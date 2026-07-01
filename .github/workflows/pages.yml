@@ -1,0 +1,45 @@
+name: Deploy benchmark report to Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - BENCH_RESULT.html
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy benchmark report
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
+      - name: Stage benchmark report
+        run: |
+          mkdir -p _site
+          cp BENCH_RESULT.html _site/index.html
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
