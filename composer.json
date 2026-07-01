@@ -1,0 +1,8 @@
+{
+	"require": {
+		"nesbot/carbon": "^3.0"
+	},
+	"config": {
+		"sort-packages": true
+	}
+}
