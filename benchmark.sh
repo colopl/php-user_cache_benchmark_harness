@@ -8,7 +8,7 @@ PHP_FPM_BIN=${PHP_FPM_BIN:-"${ROOT}/../sapi/fpm/php-fpm"}
 NGINX_BIN=${NGINX_BIN:-/usr/sbin/nginx}
 APCU_SO=${APCU_SO:-"${ROOT}/runtime/extensions/apcu/apcu.so"}
 IGBINARY_SO=${IGBINARY_SO:-"${ROOT}/runtime/extensions/igbinary/igbinary.so"}
-SHM_SIZE_MB=${OPCACHE_USER_CACHE_SHM_SIZE_MB:-128}
+SHM_SIZE_MB=${USER_CACHE_SHM_SIZE_MB:-128}
 OUTPUT=${OUTPUT:-"${ROOT}/BENCH_RESULT.html"}
 RESULTS_DIR=${RESULTS_DIR:-}
 LOCK_DIR=${UC_BENCH_LOCK_DIR:-"${ROOT}/runtime/benchmark.lock"}
@@ -18,10 +18,10 @@ QUICK=0
 RUNS=${UC_BENCH_RUNS:-3}
 RUNS_SET=0
 
-READ_CASES=constant_array,route_table_read,large_array,large_string,large_object_graph,metadata_object_read,metadata_object_fetch_mutate,sleep_wakeup_object,serialize_magic_entity,unserialize_only_entity,sleep_wakeup_entity_collection,sleep_wakeup_large_dataset,recursive_reference_graph,mixed_serialization_payload,product_listing_view_model,multi_key_config_read,safe_direct_object,spl_collection_object,spl_linked_collection_object,spl_heap_object,carbon_datetime_object,carbon_model_object,serialized_cycle_object,reference_assignment_object,cycle_assignment_object,nested_array_assignment
+READ_CASES=constant_array,route_table_read,large_array,large_string,large_object_graph,metadata_object_read,metadata_object_fetch_mutate,sleep_wakeup_object,serialize_magic_entity,unserialize_only_entity,sleep_wakeup_entity_collection,sleep_wakeup_large_dataset,recursive_reference_graph,mixed_serialization_payload,product_listing_view_model,multi_key_config_read,safe_direct_object,spl_collection_object,spl_linked_collection_object,spl_heap_object,carbon_datetime_object,carbon_model_object,raw_datetime_object,raw_model_object,serialized_cycle_object,reference_assignment_object,cycle_assignment_object,nested_array_assignment
 WRITE_CASES=${WRITE_CASES:-${READ_CASES}}
 RESIDENT_CASES=constant_array,route_table_read,large_array,large_string,product_listing_view_model
-FPM_HOT_CASES=route_table_read,large_array,large_string,large_object_graph,metadata_object_read,metadata_object_fetch_mutate,sleep_wakeup_object,serialize_magic_entity,unserialize_only_entity,sleep_wakeup_entity_collection,sleep_wakeup_large_dataset,recursive_reference_graph,mixed_serialization_payload,product_listing_view_model,multi_key_config_read,safe_direct_object,spl_collection_object,spl_heap_object,carbon_datetime_object,carbon_model_object,serialized_cycle_object,reference_assignment_object,cycle_assignment_object,nested_array_assignment
+FPM_HOT_CASES=route_table_read,large_array,large_string,large_object_graph,metadata_object_read,metadata_object_fetch_mutate,sleep_wakeup_object,serialize_magic_entity,unserialize_only_entity,sleep_wakeup_entity_collection,sleep_wakeup_large_dataset,recursive_reference_graph,mixed_serialization_payload,product_listing_view_model,multi_key_config_read,safe_direct_object,spl_collection_object,spl_heap_object,carbon_datetime_object,carbon_model_object,raw_datetime_object,raw_model_object,serialized_cycle_object,reference_assignment_object,cycle_assignment_object,nested_array_assignment
 BACKENDS=user_cache,apcu,apcu_igbinary
 FPM_PHP_BACKENDS=user_cache,apcu
 FPM_IGBINARY_BACKENDS=user_cache,apcu_igbinary
@@ -53,7 +53,7 @@ usage() {
 	cat <<'EOF'
 Usage: ./benchmark.sh OPTIONS
 
-Runs the OPcache UserCache read-heavy benchmark set, adds write workload
+Runs the UserCache read-heavy benchmark set, adds write workload
 context, and writes a combined BENCH_RESULT.html.
 
 By default the full suite is executed 3 times and every published metric is
@@ -70,7 +70,7 @@ Options:
   --nginx-bin FILE      nginx binary. Default: /usr/sbin/nginx
   --apcu-so FILE        APCu extension module path.
   --igbinary-so FILE    igbinary extension module path.
-  --shm-size-mb N       opcache.user_cache_shm_size in MiB. Default: 128
+  --shm-size-mb N       user_cache.shm_size in MiB. Default: 128
   --results-dir DIR     Directory for raw JSON/HTML artifacts.
   --output FILE         Combined HTML report. Default: BENCH_RESULT.html
 EOF
@@ -340,7 +340,7 @@ printf 'Final report: %s\n' "${OUTPUT}"
 
 printf '\nStep 1/7: CLI repeated read workloads\n'
 PHP_BIN="${PHP_CLI_BIN}" \
-OPCACHE_USER_CACHE_SHM_SIZE_MB="${SHM_SIZE_MB}" \
+USER_CACHE_SHM_SIZE_MB="${SHM_SIZE_MB}" \
 "${ROOT}/scripts/benchmark_user_cache.sh" \
 	--php "${PHP_CLI_BIN}" \
 	--apcu-so "${APCU_SO}" \
@@ -357,7 +357,7 @@ CLI_JSON=$(latest_json "${CLI_READ_DIR}")
 
 printf '\nStep 2/7: CLI write workloads\n'
 PHP_BIN="${PHP_CLI_BIN}" \
-OPCACHE_USER_CACHE_SHM_SIZE_MB="${SHM_SIZE_MB}" \
+USER_CACHE_SHM_SIZE_MB="${SHM_SIZE_MB}" \
 "${ROOT}/scripts/benchmark_user_cache.sh" \
 	--php "${PHP_CLI_BIN}" \
 	--apcu-so "${APCU_SO}" \
@@ -377,6 +377,8 @@ printf '\nStep 3/7: Resident payload probe\n'
 RESIDENT_JSON="${RESULTS_DIR}/resident-payload-probe.json"
 "${PHP_CLI_BIN}" \
 	-d opcache.enable_cli=1 \
+	-d user_cache.enable=1 \
+	-d user_cache.enable_cli=1 \
 	-d opcache.jit=0 \
 	"${ROOT}/scripts/benchmark_user_cache_resident_probe.php" \
 	--cases "${RESIDENT_CASES}" \
@@ -390,8 +392,10 @@ BULK32_JSON="${RESULTS_DIR}/bulk-read-32.json"
 "${PHP_CLI_BIN}" \
 	-d opcache.enable=1 \
 	-d opcache.enable_cli=1 \
+	-d user_cache.enable=1 \
+	-d user_cache.enable_cli=1 \
 	-d opcache.jit=0 \
-	-d "opcache.user_cache_shm_size=${SHM_SIZE_MB}M" \
+	-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
 	-d apc.enable_cli=1 \
 	-d "extension=${APCU_SO}" \
 	"${ROOT}/scripts/benchmark_user_cache_bulk_read.php" \
@@ -406,8 +410,10 @@ BULK128_JSON="${RESULTS_DIR}/bulk-read-128.json"
 "${PHP_CLI_BIN}" \
 	-d opcache.enable=1 \
 	-d opcache.enable_cli=1 \
+	-d user_cache.enable=1 \
+	-d user_cache.enable_cli=1 \
 	-d opcache.jit=0 \
-	-d "opcache.user_cache_shm_size=${SHM_SIZE_MB}M" \
+	-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
 	-d apc.enable_cli=1 \
 	-d "extension=${APCU_SO}" \
 	"${ROOT}/scripts/benchmark_user_cache_bulk_read.php" \

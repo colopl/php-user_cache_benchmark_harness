@@ -65,7 +65,7 @@ function uc_fpm_read_case(string $caseName): array
 
 function uc_fpm_read_key(string $caseName, string $backendName): string
 {
-	return 'opcache_user_cache_fpm_read_benchmark.' . UC_BENCH_VERSION . '.' . $backendName . '.' . $caseName;
+	return 'user_cache_fpm_read_benchmark.' . UC_BENCH_VERSION . '.' . $backendName . '.' . $caseName;
 }
 
 try {
@@ -84,7 +84,7 @@ try {
 
 		$userCacheAvailable = false;
 		$userCacheReason = null;
-		if (class_exists('Opcache\\UserCache')) {
+		if (class_exists('UserCache\Cache')) {
 			[$userCacheAvailable, $userCacheReason] = uc_bench_user_cache_status();
 		}
 
@@ -93,11 +93,11 @@ try {
 			'pid' => $pid,
 			'php_version' => PHP_VERSION,
 			'php_sapi' => PHP_SAPI,
-			'opcache_user_cache' => [
-				'class_exists' => class_exists('Opcache\\UserCache'),
+			'user_cache' => [
+				'class_exists' => class_exists('UserCache\Cache'),
 				'available' => $userCacheAvailable,
 				'unavailable_reason' => $userCacheReason,
-				'shm_size' => ini_get('opcache.user_cache_shm_size'),
+				'shm_size' => ini_get('user_cache.shm_size'),
 			],
 			'extensions' => [
 				'apcu' => extension_loaded('apcu'),

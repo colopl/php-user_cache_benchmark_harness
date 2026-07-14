@@ -123,7 +123,7 @@ final class UcPerformanceReport
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OPcache User Cache Performance Report</title>
+<title>UserCache\Cache Performance Report</title>
 <style>
 :root {
   color-scheme: light;
@@ -278,7 +278,7 @@ code {
 </head>
 <body>
 <main>
-<h1>OPcache User Cache Performance Report</h1>
+<h1>UserCache\Cache Performance Report</h1>
 <p>Generated at <code>' . self::h(gmdate(DATE_ATOM)) . '</code>. Times are in microseconds; lower is faster.</p>
 <div class="cards">' . implode('', $cards) . '</div>
 ' . $this->environmentSection($cliRead, $fpmOnceRuns, $fpmHotRuns) . '
@@ -313,9 +313,15 @@ code {
 			? (!empty($environment['php_zts']) ? 'ZTS' : 'NTS')
 			: (PHP_ZTS ? 'ZTS' : 'NTS');
 		$loaded = [];
-		foreach ($extensions as $name => $enabled) {
-			if ($enabled) {
-				$loaded[] = (string) $name;
+		foreach ($extensions as $name => $value) {
+			if (is_bool($value)) {
+				/* Legacy shape: extension name => enabled flag. */
+				if ($value) {
+					$loaded[] = (string) $name;
+				}
+			} else {
+				/* Current shape: flat list of loaded extension names. */
+				$loaded[] = (string) $value;
 			}
 		}
 
@@ -324,8 +330,8 @@ code {
 			'Thread Safety' => $threadSafety,
 			'Binary' => (string) ($environment['php_binary'] ?? ''),
 			'System' => (string) ($environment['uname'] ?? ''),
-			'opcache.user_cache_shm_size' => (string) ($ini['opcache.user_cache_shm_size'] ?? ''),
-			'Loaded benchmark extensions' => $loaded !== [] ? implode(', ', $loaded) : 'none',
+			'user_cache.shm_size' => (string) ($ini['user_cache.shm_size'] ?? ''),
+			'Loaded extensions' => $loaded !== [] ? implode(', ', $loaded) : 'none',
 		];
 
 		$html = '<h2>Environment</h2><table><tbody>';

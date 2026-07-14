@@ -9,8 +9,8 @@ NGINX_BIN=${NGINX_BIN:-/usr/sbin/nginx}
 BASE_URL=${BASE_URL:-http://127.0.0.1:8080/user_cache_fpm_read_bench.php}
 APCU_SO=${APCU_SO:-"${ROOT}/runtime/extensions/apcu/apcu.so"}
 IGBINARY_SO=${IGBINARY_SO:-}
-SHM_SIZE=${OPCACHE_USER_CACHE_SHM_SIZE:-64M}
-MEMORY_LIMIT=${OPCACHE_USER_CACHE_BENCHMARK_MEMORY_LIMIT:--1}
+SHM_SIZE=${USER_CACHE_SHM_SIZE:-64M}
+MEMORY_LIMIT=${USER_CACHE_BENCHMARK_MEMORY_LIMIT:--1}
 APC_SHM_SIZE=${APC_SHM_SIZE:-128M}
 APC_SERIALIZER=${APC_SERIALIZER:-php}
 OUTPUT_DIR=${OUTPUT_DIR:-"${ROOT}/results"}
@@ -33,7 +33,7 @@ Wrapper options:
   --apcu-so FILE        APCu extension module.
   --igbinary-so FILE    igbinary extension module.
   --apc-serializer NAME APCu serializer. Default: php
-  --shm-size SIZE       opcache.user_cache_shm_size. Default: 64M
+  --shm-size SIZE       user_cache.shm_size. Default: 64M
   --apc-shm-size SIZE   apc.shm_size. Default: 128M
   --output-dir DIR      Result directory. Default: results
 
@@ -263,7 +263,8 @@ if test -n "${IGBINARY_SO}"; then
 		-d opcache.enable_cli=0 \
 		-d opcache.validate_timestamps=0 \
 		-d opcache.jit=0 \
-		-d "opcache.user_cache_shm_size=${SHM_SIZE}" \
+		-d "user_cache.shm_size=${SHM_SIZE}" \
+		-d user_cache.enable=1 \
 		-y "${ROOT}/php-fpm.conf" &
 else
 	"${PHP_FPM_BIN}" \
@@ -277,7 +278,8 @@ else
 	-d opcache.enable_cli=0 \
 	-d opcache.validate_timestamps=0 \
 	-d opcache.jit=0 \
-	-d "opcache.user_cache_shm_size=${SHM_SIZE}" \
+	-d "user_cache.shm_size=${SHM_SIZE}" \
+		-d user_cache.enable=1 \
 	-y "${ROOT}/php-fpm.conf" &
 fi
 PHP_FPM_PID=${!}

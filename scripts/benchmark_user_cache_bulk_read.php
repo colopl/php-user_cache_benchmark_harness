@@ -37,19 +37,19 @@ abstract class UcBulkReadAbstractBackend implements UcBulkReadBackend
 
 final class UcBulkReadUserCacheBackend extends UcBulkReadAbstractBackend
 {
-	private ?Opcache\UserCache $cache = null;
+	private ?UserCache\Cache $cache = null;
 
 	public function __construct()
 	{
-		if (!class_exists('Opcache\\UserCache')) {
-			$this->unavailable('Opcache\\UserCache class is not available');
+		if (!class_exists('UserCache\Cache')) {
+			$this->unavailable('UserCache\Cache class is not available');
 			return;
 		}
 
-		$this->cache = Opcache\UserCache::getPool('bulk-read-benchmark');
+		$this->cache = UserCache\Cache::getPool('bulk-read-benchmark');
 		[$available, $reason] = uc_bench_user_cache_status();
 		if (!$available) {
-			$this->unavailable($reason ?? 'Opcache\\UserCache is unavailable');
+			$this->unavailable($reason ?? 'UserCache\Cache is unavailable');
 		}
 	}
 
@@ -61,14 +61,14 @@ final class UcBulkReadUserCacheBackend extends UcBulkReadAbstractBackend
 	public function clear(): void
 	{
 		if ($this->cache === null || !$this->cache->clear()) {
-			throw new RuntimeException('Opcache\\UserCache::clear() failed');
+			throw new RuntimeException('UserCache\Cache::clear() failed');
 		}
 	}
 
 	public function prime(array $values): void
 	{
 		if ($this->cache === null || !$this->cache->storeMultiple($values)) {
-			throw new RuntimeException('Opcache\\UserCache::storeMultiple() failed');
+			throw new RuntimeException('UserCache\Cache::storeMultiple() failed');
 		}
 	}
 
@@ -76,7 +76,7 @@ final class UcBulkReadUserCacheBackend extends UcBulkReadAbstractBackend
 	{
 		$result = $this->cache?->fetchMultiple($keys);
 		if (!is_array($result)) {
-			throw new RuntimeException('Opcache\\UserCache::fetchMultiple() did not return an array');
+			throw new RuntimeException('UserCache\Cache::fetchMultiple() did not return an array');
 		}
 
 		return $result;
@@ -85,19 +85,19 @@ final class UcBulkReadUserCacheBackend extends UcBulkReadAbstractBackend
 
 final class UcBulkReadUserCacheLoopBackend extends UcBulkReadAbstractBackend
 {
-	private ?Opcache\UserCache $cache = null;
+	private ?UserCache\Cache $cache = null;
 
 	public function __construct()
 	{
-		if (!class_exists('Opcache\\UserCache')) {
-			$this->unavailable('Opcache\\UserCache class is not available');
+		if (!class_exists('UserCache\Cache')) {
+			$this->unavailable('UserCache\Cache class is not available');
 			return;
 		}
 
-		$this->cache = Opcache\UserCache::getPool('bulk-read-loop-benchmark');
+		$this->cache = UserCache\Cache::getPool('bulk-read-loop-benchmark');
 		[$available, $reason] = uc_bench_user_cache_status();
 		if (!$available) {
-			$this->unavailable($reason ?? 'Opcache\\UserCache is unavailable');
+			$this->unavailable($reason ?? 'UserCache\Cache is unavailable');
 		}
 	}
 
@@ -109,14 +109,14 @@ final class UcBulkReadUserCacheLoopBackend extends UcBulkReadAbstractBackend
 	public function clear(): void
 	{
 		if ($this->cache === null || !$this->cache->clear()) {
-			throw new RuntimeException('Opcache\\UserCache::clear() failed');
+			throw new RuntimeException('UserCache\Cache::clear() failed');
 		}
 	}
 
 	public function prime(array $values): void
 	{
 		if ($this->cache === null || !$this->cache->storeMultiple($values)) {
-			throw new RuntimeException('Opcache\\UserCache::storeMultiple() failed');
+			throw new RuntimeException('UserCache\Cache::storeMultiple() failed');
 		}
 	}
 
@@ -127,7 +127,7 @@ final class UcBulkReadUserCacheLoopBackend extends UcBulkReadAbstractBackend
 		foreach ($keys as $key) {
 			$value = $this->cache?->fetch($key, $default);
 			if ($value === $default) {
-				throw new RuntimeException('Opcache\\UserCache::fetch() missed key ' . $key);
+				throw new RuntimeException('UserCache\Cache::fetch() missed key ' . $key);
 			}
 			$result[$key] = $value;
 		}
@@ -304,7 +304,7 @@ final class UcBulkReadRunner
 			'environment' => [
 				'php_version' => PHP_VERSION,
 				'php_sapi' => PHP_SAPI,
-				'opcache_user_cache_shm_size' => ini_get('opcache.user_cache_shm_size'),
+				'user_cache_shm_size' => ini_get('user_cache.shm_size'),
 				'apcu' => extension_loaded('apcu'),
 			],
 			'rows' => $rows,

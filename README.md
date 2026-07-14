@@ -1,9 +1,9 @@
-# OPcache UserCache Benchmark Harness
+# UserCache Benchmark Harness
 
-**[View latest benchmark result](https://colopl.github.io/php-opcache_user_cache_benchmark_harness/)**
+**[View latest benchmark result](https://colopl.github.io/php-user_cache_benchmark_harness/)**
 
 This directory contains the minimal benchmark harness used to evaluate
-`Opcache\UserCache` against APCu serializer variants.
+`UserCache\Cache` against APCu serializer variants.
 
 The primary target is read-heavy shared-cache usage. Write workloads are also
 reported for context, but they are not the main success criterion because APCu
@@ -27,19 +27,19 @@ modules are missing. Generated benchmark output is written under `results/`.
 From the PHP source root:
 
 ```sh
-php-opcache_user_cache_benchmark_harness/benchmark.sh --quick
+php-user_cache_benchmark_harness/benchmark.sh --quick
 ```
 
 The quick run executes a short smoke version of the full workload as a single
 run (use `--runs N` to aggregate several quick runs) and writes:
 
-- `php-opcache_user_cache_benchmark_harness/BENCH_RESULT.html`
-- raw JSON and per-step HTML files under `php-opcache_user_cache_benchmark_harness/results/`
+- `php-user_cache_benchmark_harness/BENCH_RESULT.html`
+- raw JSON and per-step HTML files under `php-user_cache_benchmark_harness/results/`
 
 ## Full Read-Heavy Report
 
 ```sh
-php-opcache_user_cache_benchmark_harness/benchmark.sh
+php-user_cache_benchmark_harness/benchmark.sh
 ```
 
 By default this executes the full suite **3 times** and renders
@@ -75,7 +75,7 @@ backends concurrently.
 ## Useful Options
 
 ```sh
-php-opcache_user_cache_benchmark_harness/benchmark.sh \
+php-user_cache_benchmark_harness/benchmark.sh \
   --php /path/to/sapi/cli/php \
   --php-fpm /path/to/sapi/fpm/php-fpm \
   --nginx-bin /usr/sbin/nginx \
@@ -85,7 +85,7 @@ php-opcache_user_cache_benchmark_harness/benchmark.sh \
 ```
 
 `--shm-size-mb` accepts an integer MiB value and is passed as
-`opcache.user_cache_shm_size=${N}M`.
+`user_cache.shm_size=${N}M`.
 
 ## Lower-Level Entrypoints
 
@@ -113,8 +113,8 @@ php-opcache_user_cache_benchmark_harness/benchmark.sh \
 ## Compared Backends
 
 `user_cache`
-: `Opcache\UserCache::store()`, `fetch()`, and `fetchMultiple()`. The
-  harness uses the current enum-shaped `UserCacheStatus::getAvailability()` API.
+: `UserCache\Cache::store()`, `fetch()`, and `fetchMultiple()`. The
+  harness uses the current enum-shaped `UserCache\CacheStatus::getAvailability()` API.
 
 `apcu`
 : `apcu_store()`, `apcu_fetch()`, and `apcu_fetch()` loops.

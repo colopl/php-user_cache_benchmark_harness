@@ -4,10 +4,10 @@ set -eu
 
 ROOT=$(CDPATH= cd "$(dirname "${0}")/.." && pwd)
 PHP_BIN=${PHP_BIN:-"${ROOT}/../sapi/cli/php"}
-SHM_SIZE_MB=${OPCACHE_USER_CACHE_SHM_SIZE_MB:-64}
-MEMORY_LIMIT=${OPCACHE_USER_CACHE_BENCHMARK_MEMORY_LIMIT:--1}
-EXTENSION_BUILD_DIR=${OPCACHE_USER_CACHE_BENCHMARK_EXTENSION_DIR:-"${ROOT}/runtime/extensions"}
-BUILD_EXTENSIONS=${OPCACHE_USER_CACHE_BENCHMARK_BUILD_EXTENSIONS:-1}
+SHM_SIZE_MB=${USER_CACHE_SHM_SIZE_MB:-64}
+MEMORY_LIMIT=${USER_CACHE_BENCHMARK_MEMORY_LIMIT:--1}
+EXTENSION_BUILD_DIR=${USER_CACHE_BENCHMARK_EXTENSION_DIR:-"${ROOT}/runtime/extensions"}
+BUILD_EXTENSIONS=${USER_CACHE_BENCHMARK_BUILD_EXTENSIONS:-1}
 APCU_SO=${APCU_SO:-}
 IGBINARY_SO=${IGBINARY_SO:-}
 PHPIZE=${PHPIZE:-}
@@ -220,8 +220,10 @@ if test -f "${APCU_SO}" && test -f "${IGBINARY_SO}"; then
 	UC_BENCH_PHP_ARGS_JSON=$(worker_args_json \
 		-d opcache.enable=1 \
 		-d opcache.enable_cli=1 \
+		-d user_cache.enable=1 \
+		-d user_cache.enable_cli=1 \
 		-d opcache.jit=0 \
-		-d "opcache.user_cache_shm_size=${SHM_SIZE_MB}M" \
+		-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
 		-d apc.enable_cli=1 \
 		-d "extension=${APCU_SO}" \
 		-d "extension=${IGBINARY_SO}")
@@ -230,8 +232,10 @@ if test -f "${APCU_SO}" && test -f "${IGBINARY_SO}"; then
 		-d "memory_limit=${MEMORY_LIMIT}" \
 		-d opcache.enable=1 \
 		-d opcache.enable_cli=1 \
+		-d user_cache.enable=1 \
+		-d user_cache.enable_cli=1 \
 		-d opcache.jit=0 \
-		-d "opcache.user_cache_shm_size=${SHM_SIZE_MB}M" \
+		-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
 		-d apc.enable_cli=1 \
 		-d "extension=${APCU_SO}" \
 		-d "extension=${IGBINARY_SO}" \
@@ -243,8 +247,10 @@ if test -f "${APCU_SO}"; then
 	UC_BENCH_PHP_ARGS_JSON=$(worker_args_json \
 		-d opcache.enable=1 \
 		-d opcache.enable_cli=1 \
+		-d user_cache.enable=1 \
+		-d user_cache.enable_cli=1 \
 		-d opcache.jit=0 \
-		-d "opcache.user_cache_shm_size=${SHM_SIZE_MB}M" \
+		-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
 		-d apc.enable_cli=1 \
 		-d "extension=${APCU_SO}")
 	export UC_BENCH_PHP_ARGS_JSON
@@ -252,8 +258,10 @@ if test -f "${APCU_SO}"; then
 		-d "memory_limit=${MEMORY_LIMIT}" \
 		-d opcache.enable=1 \
 		-d opcache.enable_cli=1 \
+		-d user_cache.enable=1 \
+		-d user_cache.enable_cli=1 \
 		-d opcache.jit=0 \
-		-d "opcache.user_cache_shm_size=${SHM_SIZE_MB}M" \
+		-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
 		-d apc.enable_cli=1 \
 		-d "extension=${APCU_SO}" \
 		"${ROOT}/scripts/UserCacheBenchmark.php" "${@}"
@@ -263,8 +271,10 @@ fi
 UC_BENCH_PHP_ARGS_JSON=$(worker_args_json \
 	-d opcache.enable=1 \
 	-d opcache.enable_cli=1 \
+	-d user_cache.enable=1 \
+	-d user_cache.enable_cli=1 \
 	-d opcache.jit=0 \
-	-d "opcache.user_cache_shm_size=${SHM_SIZE_MB}M" \
+	-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
 	-d apc.enable_cli=1)
 export UC_BENCH_PHP_ARGS_JSON
 
@@ -272,8 +282,10 @@ export UC_BENCH_PHP_ARGS_JSON
 	-d "memory_limit=${MEMORY_LIMIT}" \
 	-d opcache.enable=1 \
 	-d opcache.enable_cli=1 \
+	-d user_cache.enable=1 \
+	-d user_cache.enable_cli=1 \
 	-d opcache.jit=0 \
-	-d "opcache.user_cache_shm_size=${SHM_SIZE_MB}M" \
+	-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
 	-d apc.enable_cli=1 \
 	"${ROOT}/scripts/UserCacheBenchmark.php" "${@}"
 exit "${?}"

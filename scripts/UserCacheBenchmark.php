@@ -193,6 +193,19 @@ final class UcBenchCarbonModel
 	}
 }
 
+final class UcBenchRawModel
+{
+	public function __construct(
+		public int $id,
+		public string $name,
+		public DateTimeInterface $createdAt,
+		public DateTimeInterface $updatedAt,
+		public DateTimeInterface $publishedAt,
+		public array $attributes,
+	) {
+	}
+}
+
 final class UcBenchReferencedPayload
 {
 	public function __construct(
@@ -239,6 +252,17 @@ final class UcBenchCarbonDateTimePayload
 		public Carbon\CarbonImmutable $createdAt,
 		public Carbon\Carbon $updatedAt,
 		public Carbon\CarbonTimeZone $timezone,
+		public array $timeline,
+	) {
+	}
+}
+
+final class UcBenchRawDateTimePayload
+{
+	public function __construct(
+		public DateTimeImmutable $createdAt,
+		public DateTime $updatedAt,
+		public DateTimeZone $timezone,
 		public array $timeline,
 	) {
 	}
@@ -331,7 +355,7 @@ function uc_bench_unavailable_reason_to_string(mixed $reason): ?string
 
 function uc_bench_user_cache_status(): array
 {
-	$status = Opcache\UserCache::getStatus();
+	$status = UserCache\Cache::getStatus();
 	$availability = $status->getAvailability();
 
 	return [
@@ -364,21 +388,21 @@ abstract class UcBenchAbstractBackend implements UcBenchBackend
 
 final class UcBenchUserCacheBackend extends UcBenchAbstractBackend
 {
-	private ?Opcache\UserCache $cache = null;
+	private ?UserCache\Cache $cache = null;
 	private static ?stdClass $default = null;
 
 	public function __construct(private readonly string $scope)
 	{
-		if (!class_exists('Opcache\\UserCache')) {
-			$this->unavailable('Opcache\\UserCache class is not available');
+		if (!class_exists('UserCache\Cache')) {
+			$this->unavailable('UserCache\Cache class is not available');
 			return;
 		}
 
 		try {
-			$this->cache = Opcache\UserCache::getPool($scope);
+			$this->cache = UserCache\Cache::getPool($scope);
 			[$this->available, $this->unavailableReason] = uc_bench_user_cache_status();
 			if (!$this->available && $this->unavailableReason === null) {
-				$this->unavailableReason = 'Opcache\\UserCache is disabled or unavailable';
+				$this->unavailableReason = 'UserCache\Cache is disabled or unavailable';
 			}
 		} catch (Throwable $exception) {
 			$this->unavailable($exception->getMessage());
@@ -392,20 +416,20 @@ final class UcBenchUserCacheBackend extends UcBenchAbstractBackend
 
 	public function label(): string
 	{
-		return 'Opcache\\UserCache store/fetch';
+		return 'UserCache\Cache store/fetch';
 	}
 
 	public function clear(): void
 	{
 		if ($this->cache === null || !$this->cache->clear()) {
-			throw new RuntimeException('Opcache\\UserCache::clear() failed for scope ' . $this->scope);
+			throw new RuntimeException('UserCache\Cache::clear() failed for scope ' . $this->scope);
 		}
 	}
 
 	public function store(string $key, mixed $value): void
 	{
 		if ($this->cache === null || !$this->cache->store($key, $value)) {
-			throw new RuntimeException('Opcache\\UserCache::store() failed for key ' . $key);
+			throw new RuntimeException('UserCache\Cache::store() failed for key ' . $key);
 		}
 	}
 
@@ -414,7 +438,7 @@ final class UcBenchUserCacheBackend extends UcBenchAbstractBackend
 		$default = self::$default ??= new stdClass();
 		$value = $this->cache?->fetch($key, $default);
 		if ($value === $default) {
-			throw new RuntimeException('Opcache\\UserCache::fetch() missed key ' . $key);
+			throw new RuntimeException('UserCache\Cache::fetch() missed key ' . $key);
 		}
 
 		return $value;
@@ -530,7 +554,7 @@ final class UcBenchPayloadFactory
 		],
 		'headers' => [
 			'cache-control' => 'public, max-age=60',
-			'x-benchmark' => 'opcache-user-cache',
+			'x-benchmark' => 'user-cache',
 		],
 		'weights' => [3, 5, 8, 13, 21, 34, 55, 89],
 	];
@@ -743,6 +767,27 @@ final class UcBenchPayloadFactory
 				null,
 				static fn (mixed $payload, int $operation): int => self::carbonModelProbe($payload, $operation),
 			),
+			'raw_datetime_object' => self::case(
+				'Raw DateTime serializer object',
+				'DateTimeImmutable/DateTime/DateTimeZone object graph mirroring carbon_datetime_object with native date types.',
+				static fn (): mixed => new UcBenchRawDateTimePayload(
+					new DateTimeImmutable('2026-05-01 10:30:45.123456', new DateTimeZone('Asia/Tokyo')),
+					new DateTime('2027-07-04 14:35:51.654321', new DateTimeZone('Europe/Paris')),
+					new DateTimeZone('Europe/Paris'),
+					self::buildRawTimeline(),
+				),
+				static fn (mixed $payload): string => self::rawDateTimeDigest($payload),
+				null,
+				static fn (mixed $payload, int $operation): int => self::rawDateTimeProbe($payload, $operation),
+			),
+			'raw_model_object' => self::case(
+				'Model with DateTime properties',
+				'Dummy model objects with three native DateTime properties: createdAt, updatedAt, and publishedAt.',
+				static fn (): mixed => self::buildRawModelObject(),
+				static fn (mixed $payload): string => self::rawModelDigest($payload),
+				null,
+				static fn (mixed $payload, int $operation): int => self::rawModelProbe($payload, $operation),
+			),
 			'serialized_cycle_object' => self::case(
 				'Serialized cyclic object',
 				'Cyclic object graph workload used to exercise serialization fallback behavior.',
@@ -864,6 +909,23 @@ final class UcBenchPayloadFactory
 		return $timeline;
 	}
 
+	private static function buildRawTimeline(): array
+	{
+		$timeline = [];
+		for ($index = 0; $index < self::CARBON_TIMELINE_COUNT; $index++) {
+			$timezone = new DateTimeZone($index % 2 === 0 ? 'Asia/Tokyo' : 'Europe/Paris');
+			$base = new DateTimeImmutable('2026-05-01 10:30:45.123456', $timezone);
+			$timeline[] = [
+				'created' => $base->modify('+' . $index . ' days'),
+				'updated' => DateTime::createFromImmutable($base->modify('+' . ($index + 1) . ' days')),
+				'timezone' => $timezone,
+				'label' => 'raw-timeline-' . $index,
+			];
+		}
+
+		return $timeline;
+	}
+
 	private static function buildSplCollectionPayload(): UcBenchSplCollectionPayload
 	{
 		$fixed = new SplFixedArray(self::SPL_COLLECTION_COUNT);
@@ -969,7 +1031,7 @@ final class UcBenchPayloadFactory
 	private static function buildLargeString(): string
 	{
 		return str_repeat(
-			'OPcache-UserCache-large-string-payload-0123456789abcdef:',
+			'UserCache-large-string-payload-0123456789abcdef:',
 			self::LARGE_STRING_REPEAT_COUNT,
 		);
 	}
@@ -1019,7 +1081,7 @@ final class UcBenchPayloadFactory
 			$services['service.' . $index] = [
 				'class' => 'App\\Service\\GeneratedService' . $index,
 				'factory' => $index % 5 === 0 ? ['container', 'make'] : null,
-				'tags' => ['cache.warmable', 'tenant.' . ($index % 8)],
+				'tags' => ['user_cache.warmable', 'tenant.' . ($index % 8)],
 				'arguments' => ['@logger', '%kernel.project_dir%', $index],
 			];
 		}
@@ -1084,6 +1146,32 @@ final class UcBenchPayloadFactory
 				$base->subDays($i)->setTimezone('UTC'),
 				Carbon\Carbon::parse('2026-06-29 12:00:00', 'UTC')->addMinutes($i * 7),
 				$base->addDays($i % 21)->setTimezone('America/Los_Angeles'),
+				[
+					'status' => ['draft', 'published', 'archived'][$i % 3],
+					'score' => $i * 17,
+					'flags' => ['featured' => $i % 5 === 0, 'locked' => $i % 7 === 0],
+				],
+			);
+		}
+
+		return [
+			'models' => $models,
+			'count' => count($models),
+		];
+	}
+
+	private static function buildRawModelObject(): array
+	{
+		$models = [];
+		$base = new DateTimeImmutable('2026-06-29 00:00:00', new DateTimeZone('UTC'));
+
+		for ($i = 0; $i < 48; $i++) {
+			$models[] = new UcBenchRawModel(
+				1000 + $i,
+				'model_' . $i,
+				$base->modify('-' . $i . ' days')->setTimezone(new DateTimeZone('UTC')),
+				(new DateTime('2026-06-29 12:00:00', new DateTimeZone('UTC')))->modify('+' . ($i * 7) . ' minutes'),
+				$base->modify('+' . ($i % 21) . ' days')->setTimezone(new DateTimeZone('America/Los_Angeles')),
 				[
 					'status' => ['draft', 'published', 'archived'][$i % 3],
 					'score' => $i * 17,
@@ -1705,6 +1793,40 @@ final class UcBenchPayloadFactory
 			+ $model->attributes['score'];
 	}
 
+	private static function rawDateTimeProbe(mixed $payload, int $operation): int
+	{
+		if (!$payload instanceof UcBenchRawDateTimePayload) {
+			throw new RuntimeException('Raw DateTime payload has an unexpected type');
+		}
+
+		$item = $payload->timeline[$operation % count($payload->timeline)] ?? null;
+		if (!is_array($item) || !$item['created'] instanceof DateTimeInterface) {
+			throw new RuntimeException('Raw timeline payload is incomplete');
+		}
+
+		return (int) $payload->createdAt->format('U')
+			+ (int) $payload->updatedAt->format('s')
+			+ (int) $item['created']->format('d')
+			+ strlen($payload->timezone->getName());
+	}
+
+	private static function rawModelProbe(mixed $payload, int $operation): int
+	{
+		if (!is_array($payload) || !isset($payload['models']) || !is_array($payload['models'])) {
+			throw new RuntimeException('Raw model payload has an unexpected type');
+		}
+
+		$model = $payload['models'][$operation % count($payload['models'])] ?? null;
+		if (!$model instanceof UcBenchRawModel) {
+			throw new RuntimeException('Raw model payload is incomplete');
+		}
+
+		return $model->id
+			+ (int) $model->createdAt->format('d')
+			+ (int) $model->updatedAt->format('H')
+			+ $model->attributes['score'];
+	}
+
 	private static function referenceProbe(mixed $payload, int $operation): int
 	{
 		if (!$payload instanceof UcBenchReferencePayload) {
@@ -1916,6 +2038,48 @@ final class UcBenchPayloadFactory
 		$model = $payload['models'][17] ?? null;
 		if (!$model instanceof UcBenchCarbonModel) {
 			throw new RuntimeException('Carbon model payload is incomplete');
+		}
+
+		return $payload['count']
+			. ':' . $model->id
+			. ':' . $model->name
+			. ':' . $model->createdAt->format('Y-m-d H:i:s.u e')
+			. ':' . $model->updatedAt->format('Y-m-d H:i:s.u e')
+			. ':' . $model->publishedAt->format('Y-m-d H:i:s.u e')
+			. ':' . $model->attributes['status']
+			. ':' . $model->attributes['score'];
+	}
+
+	private static function rawDateTimeDigest(mixed $payload): string
+	{
+		if (!$payload instanceof UcBenchRawDateTimePayload) {
+			throw new RuntimeException('Raw DateTime payload has an unexpected type');
+		}
+
+		$middle = $payload->timeline[intdiv(count($payload->timeline), 2)] ?? null;
+		$last = $payload->timeline[count($payload->timeline) - 1] ?? null;
+		if (!is_array($middle) || !is_array($last)) {
+			throw new RuntimeException('Raw DateTime timeline payload is incomplete');
+		}
+
+		return $payload->createdAt->format('Y-m-d H:i:s.u e')
+			. ':' . $payload->updatedAt->format('Y-m-d H:i:s.u e')
+			. ':' . $payload->timezone->getName()
+			. ':' . count($payload->timeline)
+			. ':' . $middle['created']->format('Y-m-d H:i:s.u e')
+			. ':' . $last['updated']->format('Y-m-d H:i:s.u e')
+			. ':' . $last['timezone']->getName();
+	}
+
+	private static function rawModelDigest(mixed $payload): string
+	{
+		if (!is_array($payload) || !isset($payload['models'])) {
+			throw new RuntimeException('Raw model payload has an unexpected type');
+		}
+
+		$model = $payload['models'][17] ?? null;
+		if (!$model instanceof UcBenchRawModel) {
+			throw new RuntimeException('Raw model payload is incomplete');
 		}
 
 		return $payload['count']
@@ -2469,12 +2633,15 @@ final class UcBenchRunner
 
 	private function cacheKey(string $mode, string $backend, string $caseName): string
 	{
-		return 'opcache_user_cache_benchmark.' . UC_BENCH_VERSION . '.' . $mode . '.' . $backend . '.' . $caseName;
+		return 'user_cache_benchmark.' . UC_BENCH_VERSION . '.' . $mode . '.' . $backend . '.' . $caseName;
 	}
 
 	private function environment(): array
 	{
 		$opcacheStatus = function_exists('opcache_get_status') ? opcache_get_status(false) : false;
+
+		$loadedExtensions = get_loaded_extensions();
+		sort($loadedExtensions, SORT_NATURAL | SORT_FLAG_CASE);
 
 		return [
 			'php_version' => PHP_VERSION,
@@ -2482,15 +2649,11 @@ final class UcBenchRunner
 			'php_binary' => PHP_BINARY,
 			'php_zts' => PHP_ZTS,
 			'uname' => php_uname(),
-			'loaded_extensions' => [
-				'zend_opcache' => extension_loaded('Zend OPcache') || function_exists('opcache_get_status'),
-				'apcu' => extension_loaded('apcu'),
-				'igbinary' => function_exists('igbinary_serialize') && function_exists('igbinary_unserialize'),
-			],
+			'loaded_extensions' => $loadedExtensions,
 			'ini' => [
 				'opcache.enable' => ini_get('opcache.enable'),
 				'opcache.enable_cli' => ini_get('opcache.enable_cli'),
-				'opcache.user_cache_shm_size' => ini_get('opcache.user_cache_shm_size'),
+				'user_cache.shm_size' => ini_get('user_cache.shm_size'),
 				'apc.enable_cli' => ini_get('apc.enable_cli'),
 			],
 			'opcache_jit' => is_array($opcacheStatus) ? ($opcacheStatus['jit'] ?? null) : null,
@@ -2529,7 +2692,7 @@ final class UcBenchHtmlReport
 {
 	public static function render(array $result, string $jsonPath): string
 	{
-		$title = 'OPcache User Cache Benchmark Result';
+		$title = 'UserCache\Cache Benchmark Result';
 		$readTable = self::metricTable($result['read'], 'mean_operation_us', 'Read latency');
 		$writeTable = self::metricTable($result['write'], 'mean_store_us', 'Store latency');
 		$failures = $result['failures'] ?? [];
@@ -3095,7 +3258,7 @@ summary {
 			'Binary' => $environment['php_binary'],
 			'System' => $environment['uname'],
 			'opcache.enable_cli' => (string) $environment['ini']['opcache.enable_cli'],
-			'opcache.user_cache_shm_size' => (string) $environment['ini']['opcache.user_cache_shm_size'],
+			'user_cache.shm_size' => (string) $environment['ini']['user_cache.shm_size'],
 			'Iterations' => (string) $options['iterations'],
 			'Warmup' => (string) $options['warmup'],
 			'Read operations' => (string) $options['read_operations'],
