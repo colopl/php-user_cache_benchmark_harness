@@ -31,6 +31,7 @@ function uc_fpm_read_backends(): array
 {
 	return [
 		'user_cache' => new UcBenchUserCacheBackend('fpm-user-cache-read-bench'),
+		'yac' => new UcBenchYacBackend(),
 		'apcu' => new UcBenchApcuBackend(),
 		'apcu_igbinary' => new UcBenchApcuBackend(
 			'apcu_igbinary',
@@ -65,7 +66,8 @@ function uc_fpm_read_case(string $caseName): array
 
 function uc_fpm_read_key(string $caseName, string $backendName): string
 {
-	return 'user_cache_fpm_read_benchmark.' . UC_BENCH_VERSION . '.' . $backendName . '.' . $caseName;
+	/* Use the same bounded key for every backend, including Yac. */
+	return substr(hash('sha256', UC_BENCH_VERSION . '.' . $backendName . '.' . $caseName), 0, 24);
 }
 
 try {
@@ -101,6 +103,7 @@ try {
 			],
 			'extensions' => [
 				'apcu' => extension_loaded('apcu'),
+				'yac' => extension_loaded('yac'),
 				'igbinary' => function_exists('igbinary_serialize') && function_exists('igbinary_unserialize'),
 			],
 			'cases' => array_keys(UcBenchPayloadFactory::all()),

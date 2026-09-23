@@ -136,6 +136,15 @@ final class UcBulkReadUserCacheLoopBackend extends UcBulkReadAbstractBackend
 	}
 }
 
+/* APCu serializes with apc.serializer (a system INI), so each serializer runs
+ * in its own process and is named after it. */
+function uc_bulk_apcu_prefix(): string
+{
+	$serializer = (string) ini_get('apc.serializer');
+
+	return $serializer === '' || $serializer === 'php' || $serializer === 'default' ? 'apcu' : 'apcu_' . $serializer;
+}
+
 final class UcBulkReadApcuBackend extends UcBulkReadAbstractBackend
 {
 	public function __construct()
@@ -151,7 +160,7 @@ final class UcBulkReadApcuBackend extends UcBulkReadAbstractBackend
 
 	public function name(): string
 	{
-		return 'apcu_fetch_multiple';
+		return uc_bulk_apcu_prefix() . '_fetch_multiple';
 	}
 
 	public function clear(): void
@@ -196,7 +205,7 @@ final class UcBulkReadApcuLoopBackend extends UcBulkReadAbstractBackend
 
 	public function name(): string
 	{
-		return 'apcu_fetch_loop';
+		return uc_bulk_apcu_prefix() . '_fetch_loop';
 	}
 
 	public function clear(): void
@@ -230,6 +239,57 @@ final class UcBulkReadApcuLoopBackend extends UcBulkReadAbstractBackend
 	}
 }
 
+final class UcBulkReadYacBackend extends UcBulkReadAbstractBackend
+{
+	private ?Yac $cache = null;
+
+	public function __construct(private readonly bool $loop = false)
+	{
+		$backend = new UcBenchYacBackend();
+		if (!$backend->available()) {
+			$this->unavailable($backend->unavailableReason() ?? 'Yac is unavailable');
+			return;
+		}
+		$this->cache = new Yac();
+		$this->available = true;
+	}
+
+	public function name(): string
+	{
+		return $this->loop ? 'yac_fetch_loop' : 'yac_fetch_multiple';
+	}
+
+	public function clear(): void
+	{
+		if ($this->cache === null || !$this->cache->flush()) {
+			throw new RuntimeException('Yac::flush() failed');
+		}
+	}
+
+	public function prime(array $values): void
+	{
+		if ($this->cache === null || !$this->cache->set($values)) {
+			throw new RuntimeException('Yac::set(array) failed');
+		}
+	}
+
+	public function fetch(array $keys): array
+	{
+		if (!$this->loop) {
+			return $this->cache->get($keys);
+		}
+		$values = [];
+		foreach ($keys as $key) {
+			$value = $this->cache->get($key);
+			if ($value === false) {
+				throw new RuntimeException('Yac::get() missed key ' . $key);
+			}
+			$values[$key] = $value;
+		}
+		return $values;
+	}
+}
+
 final class UcBulkReadRunner
 {
 	private int $keyCount = 32;
@@ -237,6 +297,9 @@ final class UcBulkReadRunner
 	private int $iterations = 30;
 	private int $warmup = 5;
 	private string $output;
+	private ?string $mergeInto = null;
+	/** @var list<string> */
+	private array $backendPrefixes = [];
 
 	public function __construct()
 	{
@@ -306,12 +369,17 @@ final class UcBulkReadRunner
 				'php_sapi' => PHP_SAPI,
 				'user_cache_shm_size' => ini_get('user_cache.shm_size'),
 				'apcu' => extension_loaded('apcu'),
+				'apc_serializer' => ini_get('apc.serializer'),
+				'yac' => extension_loaded('yac'),
 			],
 			'rows' => $rows,
 			'failures' => $failures,
 		];
 		$this->writeJson($this->output, $result);
 		$this->printSummary($result);
+		if ($this->mergeInto !== null) {
+			$this->merge($this->mergeInto, $result);
+		}
 
 		return $rows === [] ? 1 : 0;
 	}
@@ -336,6 +404,12 @@ final class UcBulkReadRunner
 				case '--output':
 					$this->output = $this->absolutePath($this->value($argv, ++$i, $arg));
 					break;
+				case '--backends':
+					$this->backendPrefixes = array_values(array_filter(explode(',', $this->value($argv, ++$i, $arg))));
+					break;
+				case '--merge-into':
+					$this->mergeInto = $this->absolutePath($this->value($argv, ++$i, $arg));
+					break;
 				case '-h':
 				case '--help':
 					$this->usage();
@@ -348,7 +422,7 @@ final class UcBulkReadRunner
 
 	private function usage(): void
 	{
-		fwrite(STDOUT, "Usage: php scripts/benchmark_user_cache_bulk_read.php [--key-count N] [--operations N] [--iterations N] [--warmup N] [--output FILE]\n");
+		fwrite(STDOUT, "Usage: php scripts/benchmark_user_cache_bulk_read.php [--key-count N] [--operations N] [--iterations N] [--warmup N] [--backends user_cache,apcu,yac] [--merge-into FILE] [--output FILE]\n");
 	}
 
 	private function values(): array
@@ -369,12 +443,16 @@ final class UcBulkReadRunner
 
 	private function backends(): array
 	{
-		return [
-			new UcBulkReadUserCacheBackend(),
-			new UcBulkReadUserCacheLoopBackend(),
-			new UcBulkReadApcuBackend(),
-			new UcBulkReadApcuLoopBackend(),
+		$backends = [
+			'user_cache' => [new UcBulkReadUserCacheBackend(), new UcBulkReadUserCacheLoopBackend()],
+			'apcu' => [new UcBulkReadApcuBackend(), new UcBulkReadApcuLoopBackend()],
+			'yac' => [new UcBulkReadYacBackend(), new UcBulkReadYacBackend(true)],
 		];
+		if ($this->backendPrefixes !== []) {
+			$backends = array_intersect_key($backends, array_flip($this->backendPrefixes));
+		}
+
+		return array_merge(...array_values($backends));
 	}
 
 	private function sample(UcBulkReadBackend $backend, array $keys, string $expected): float
@@ -429,6 +507,18 @@ final class UcBulkReadRunner
 		foreach ($result['failures'] as $failure) {
 			fprintf(STDERR, "FAIL %s: %s\n", $failure['backend'], $failure['error']);
 		}
+	}
+
+	/* Appends rows measured under another APCu serializer to an existing result. */
+	private function merge(string $path, array $result): void
+	{
+		$target = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
+		if (($target['options']['key_count'] ?? null) !== $this->keyCount) {
+			throw new RuntimeException('Cannot merge bulk results with a different key count into ' . $path);
+		}
+		$target['rows'] = array_merge($target['rows'] ?? [], $result['rows']);
+		$target['failures'] = array_merge($target['failures'] ?? [], $result['failures']);
+		$this->writeJson($path, $target);
 	}
 
 	private function writeJson(string $path, array $payload): void

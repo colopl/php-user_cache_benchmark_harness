@@ -10,6 +10,7 @@ EXTENSION_BUILD_DIR=${USER_CACHE_BENCHMARK_EXTENSION_DIR:-"${ROOT}/runtime/exten
 BUILD_EXTENSIONS=${USER_CACHE_BENCHMARK_BUILD_EXTENSIONS:-1}
 APCU_SO=${APCU_SO:-}
 IGBINARY_SO=${IGBINARY_SO:-}
+YAC_SO=${YAC_SO:-}
 PHPIZE=${PHPIZE:-}
 PHP_CONFIG=${PHP_CONFIG:-}
 LOCK_DIR=${UC_BENCH_LOCK_DIR:-"${ROOT}/runtime/benchmark.lock"}
@@ -23,10 +24,11 @@ Usage: ./scripts/benchmark_user_cache.sh WRAPPER_OPTIONS BENCHMARK_OPTIONS
 Wrapper options must appear before benchmark options.
 
 Wrapper options:
-  --build-extensions        Build APCu and igbinary if their .so files are missing. Default.
+  --build-extensions        Build APCu, igbinary and Yac if their .so files are missing. Default.
   --no-build-extensions     Do not build extensions; only load explicitly provided .so files.
   --extension-build-dir DIR Directory used for extension builds. Default: runtime/extensions.
   --apcu-so FILE            Existing APCu extension module to load.
+  --yac-so FILE             Existing Yac extension module to load.
   --igbinary-so FILE        Existing igbinary extension module to load.
   --phpize FILE             phpize for the target PHP build.
   --php-config FILE         php-config for the target PHP build.
@@ -160,6 +162,10 @@ while test "${#}" -gt 0; do
 			APCU_SO=$(absolute_path "${2:?--apcu-so requires a value}")
 			shift 2
 			;;
+		--yac-so)
+			YAC_SO=$(absolute_path "${2:?--yac-so requires a value}")
+			shift 2
+			;;
 		--igbinary-so)
 			IGBINARY_SO=$(absolute_path "${2:?--igbinary-so requires a value}")
 			shift 2
@@ -201,6 +207,7 @@ PHPIZE=${PHPIZE:-"${BUILD_ROOT}/scripts/phpize"}
 PHP_CONFIG=${PHP_CONFIG:-"${BUILD_ROOT}/scripts/php-config"}
 APCU_SO=${APCU_SO:-"${EXTENSION_BUILD_DIR}/apcu/apcu.so"}
 IGBINARY_SO=${IGBINARY_SO:-"${EXTENSION_BUILD_DIR}/igbinary/igbinary.so"}
+YAC_SO=${YAC_SO:-"${EXTENSION_BUILD_DIR}/yac/yac.so"}
 
 if test "${BENCH_HELP}" = 1; then
 	BUILD_EXTENSIONS=0
@@ -210,82 +217,41 @@ if test "${BUILD_EXTENSIONS}" = 1; then
 	require_executable "${PHPIZE}" "phpize"
 	require_executable "${PHP_CONFIG}" "php-config"
 	build_extension_if_needed "APCu" "${APCU_SO}" "${ROOT}/scripts/build_apcu.sh" "${EXTENSION_BUILD_DIR}/apcu"
+	build_extension_if_needed "Yac" "${YAC_SO}" "${ROOT}/scripts/build_yac.sh" "${EXTENSION_BUILD_DIR}/yac"
 	build_extension_if_needed "igbinary" "${IGBINARY_SO}" "${ROOT}/scripts/build_igbinary.sh" "${EXTENSION_BUILD_DIR}/igbinary"
 fi
 
 UC_BENCH_BACKEND_PHP_ARGS_JSON='{"apcu":["-d","apc.serializer=php"],"apcu_igbinary":["-d","apc.serializer=igbinary"]}'
 export UC_BENCH_BACKEND_PHP_ARGS_JSON
 
-if test -f "${APCU_SO}" && test -f "${IGBINARY_SO}"; then
-	UC_BENCH_PHP_ARGS_JSON=$(worker_args_json \
-		-d opcache.enable=1 \
-		-d opcache.enable_cli=1 \
-		-d user_cache.enable=1 \
-		-d user_cache.enable_cli=1 \
-		-d opcache.jit=0 \
-		-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
-		-d apc.enable_cli=1 \
-		-d "extension=${APCU_SO}" \
-		-d "extension=${IGBINARY_SO}")
-	export UC_BENCH_PHP_ARGS_JSON
-	"${PHP_BIN}" \
-		-d "memory_limit=${MEMORY_LIMIT}" \
-		-d opcache.enable=1 \
-		-d opcache.enable_cli=1 \
-		-d user_cache.enable=1 \
-		-d user_cache.enable_cli=1 \
-		-d opcache.jit=0 \
-		-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
-		-d apc.enable_cli=1 \
-		-d "extension=${APCU_SO}" \
-		-d "extension=${IGBINARY_SO}" \
-		"${ROOT}/scripts/UserCacheBenchmark.php" "${@}"
-	exit "${?}"
-fi
+with_php_options() {
+  if test -f "${YAC_SO}"; then
+    set -- -d "extension=${YAC_SO}" "$@"
+  fi
+  if test -f "${APCU_SO}"; then
+    set -- -d "extension=${APCU_SO}" "$@"
+  fi
+  if test -f "${IGBINARY_SO}"; then
+    set -- -d "extension=${IGBINARY_SO}" "$@"
+  fi
+  set -- \
+    -d "memory_limit=${MEMORY_LIMIT}" \
+    -d opcache.enable=1 -d opcache.enable_cli=1 -d opcache.jit=0 \
+    -d user_cache.enable=1 -d user_cache.enable_cli=1 \
+    -d "user_cache.shm_size=${SHM_SIZE_MB}M" \
+    -d apc.enabled=1 -d apc.enable_cli=1 -d "apc.shm_size=${SHM_SIZE_MB}M" \
+    -d yac.enable=1 -d yac.enable_cli=1 -d yac.serializer=php \
+    -d yac.compress_threshold=-1 -d yac.keys_memory_size=8M \
+    -d "yac.values_memory_size=${SHM_SIZE_MB}M" "$@"
+  if test "${EMIT_WORKER_ARGS}" = 1; then
+    worker_args_json "$@"
+  else
+    "${PHP_BIN}" "$@"
+  fi
+}
 
-if test -f "${APCU_SO}"; then
-	UC_BENCH_PHP_ARGS_JSON=$(worker_args_json \
-		-d opcache.enable=1 \
-		-d opcache.enable_cli=1 \
-		-d user_cache.enable=1 \
-		-d user_cache.enable_cli=1 \
-		-d opcache.jit=0 \
-		-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
-		-d apc.enable_cli=1 \
-		-d "extension=${APCU_SO}")
-	export UC_BENCH_PHP_ARGS_JSON
-	"${PHP_BIN}" \
-		-d "memory_limit=${MEMORY_LIMIT}" \
-		-d opcache.enable=1 \
-		-d opcache.enable_cli=1 \
-		-d user_cache.enable=1 \
-		-d user_cache.enable_cli=1 \
-		-d opcache.jit=0 \
-		-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
-		-d apc.enable_cli=1 \
-		-d "extension=${APCU_SO}" \
-		"${ROOT}/scripts/UserCacheBenchmark.php" "${@}"
-	exit "${?}"
-fi
-
-UC_BENCH_PHP_ARGS_JSON=$(worker_args_json \
-	-d opcache.enable=1 \
-	-d opcache.enable_cli=1 \
-	-d user_cache.enable=1 \
-	-d user_cache.enable_cli=1 \
-	-d opcache.jit=0 \
-	-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
-	-d apc.enable_cli=1)
+EMIT_WORKER_ARGS=1
+UC_BENCH_PHP_ARGS_JSON=$(with_php_options)
 export UC_BENCH_PHP_ARGS_JSON
-
-"${PHP_BIN}" \
-	-d "memory_limit=${MEMORY_LIMIT}" \
-	-d opcache.enable=1 \
-	-d opcache.enable_cli=1 \
-	-d user_cache.enable=1 \
-	-d user_cache.enable_cli=1 \
-	-d opcache.jit=0 \
-	-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
-	-d apc.enable_cli=1 \
-	"${ROOT}/scripts/UserCacheBenchmark.php" "${@}"
-exit "${?}"
+EMIT_WORKER_ARGS=0
+with_php_options "${ROOT}/scripts/UserCacheBenchmark.php" "$@"

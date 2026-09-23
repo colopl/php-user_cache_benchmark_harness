@@ -1,0 +1,156 @@
+diff --git a/frankenphp.c b/frankenphp.c
+index 732dcfb..6a22acb 100644
+--- a/frankenphp.c
++++ b/frankenphp.c
+@@ -1,4 +1,8 @@
+ #include "frankenphp.h"
++#include <ext/user_cache/php_user_cache.h>
++#if !defined(PHP_USER_CACHE_HOST_API_VERSION) || PHP_USER_CACHE_HOST_API_VERSION != 1
++#error "This adapter requires user_cache host API version 1"
++#endif
+ #include <SAPI.h>
+ #include <Zend/zend_alloc.h>
+ #include <Zend/zend_exceptions.h>
+@@ -52,7 +56,7 @@
+ 
+ #include "_cgo_export.h"
+ #include "frankenphp_arginfo.h"
+-#ifdef FRANKENPHP_TEST
++#if defined(FRANKENPHP_TEST) || defined(UC_BENCH_REFERENCE)
+ /* The persistent_zval helpers are only compiled in when a consumer needs
+  * them. The step that lands the first real caller (background workers)
+  * will drop this guard. */
+@@ -126,6 +130,16 @@ HashTable *main_thread_env = NULL;
+ 
+ static THREAD_LOCAL uintptr_t thread_index;
+ static THREAD_LOCAL bool is_worker_thread = false;
++/* Reproducible user_cache integration probe, outside the upstream host. */
++static bool uc_adapter_managed = false;
++static THREAD_LOCAL php_user_cache_scope_token uc_adapter_scope = 0;
++static void uc_adapter_abort(void) {
++  if (uc_adapter_scope != 0) {
++    php_user_cache_logical_request_end(uc_adapter_scope,
++                                       PHP_USER_CACHE_SCOPE_ABORTED);
++    uc_adapter_scope = 0;
++  }
++}
+ static THREAD_LOCAL HashTable *sandboxed_env = NULL;
+ /* prepared_env holds entries from php(_server)'s `env KEY VAL`, exposed to
+  * getenv() and merged into $_ENV when 'E' is in variables_order. Separate from
+@@ -854,9 +868,15 @@ PHP_FUNCTION(frankenphp_handle_request) {
+ 
+   struct go_frankenphp_worker_handle_request_start_return result =
+       go_frankenphp_worker_handle_request_start(thread_index);
++  /* Begin after Go supplied a real HTTP request, before module callbacks. */
++  if (result.r0 && uc_adapter_managed &&
++      php_user_cache_logical_request_begin(&uc_adapter_scope) == FAILURE) {
++    zend_bailout();
++  }
+   if (frankenphp_worker_request_startup() == FAILURE
+       /* Shutting down */
+       || !result.r0) {
++    uc_adapter_abort();
+     RETURN_FALSE;
+   }
+ 
+@@ -920,6 +940,15 @@ PHP_FUNCTION(frankenphp_handle_request) {
+     zval_ptr_dtor(&retval);
+   }
+ 
++  if (uc_adapter_scope != 0) {
++    if (php_user_cache_logical_request_end(uc_adapter_scope,
++                                           PHP_USER_CACHE_SCOPE_COMPLETE) == FAILURE) {
++      uc_adapter_abort();
++      zend_bailout();
++    }
++    uc_adapter_scope = 0;
++  }
++
+   RETURN_TRUE;
+ }
+ 
+@@ -1064,8 +1093,15 @@ static const zend_function_entry frankenphp_test_hook_functions[] = {
+            arginfo_frankenphp_test_persist_roundtrip) PHP_FE_END};
+ #endif
+ 
++#ifdef UC_BENCH_REFERENCE
++#include "user_cache_bench.h"
++#endif
++
+ PHP_MINIT_FUNCTION(frankenphp) {
+   register_frankenphp_symbols(module_number);
++#ifdef UC_BENCH_REFERENCE
++  if (uc_bench_minit() == FAILURE) return FAILURE;
++#endif
+ #ifndef PHP_WIN32
+   /* MINIT runs once per ZTS thread — guard the atfork registration */
+   static pthread_once_t atfork_once = PTHREAD_ONCE_INIT;
+@@ -1111,9 +1147,15 @@ static zend_module_entry frankenphp_module = {
+     "frankenphp",
+     ext_functions,         /* function table */
+     PHP_MINIT(frankenphp), /* initialization */
++#ifdef UC_BENCH_REFERENCE
++    PHP_MSHUTDOWN(uc_bench),
++    NULL,
++    PHP_RSHUTDOWN(uc_bench),
++#else
+     NULL,                  /* shutdown */
+     NULL,                  /* request initialization */
+     NULL,                  /* request shutdown */
++#endif
+     NULL,                  /* information */
+     TOSTRING(FRANKENPHP_VERSION),
+     STANDARD_MODULE_PROPERTIES};
+@@ -1122,6 +1164,18 @@ static int frankenphp_startup(sapi_module_struct *sapi_module) {
+   php_import_environment_variables = get_full_env;
+ 
+   int result = php_module_startup(sapi_module, &frankenphp_module);
++  /* "legacy" reproduces the original REQUEST-mode opt-in probe. */
++  const char *uc_option = getenv("UC_LIFECYCLE_OPT_IN");
++  if (result == SUCCESS && uc_option != NULL) {
++    uc_adapter_managed = strcmp(uc_option, "legacy") != 0;
++    if (php_user_cache_opt_in(uc_adapter_managed
++            ? PHP_USER_CACHE_MODE_HOST_MANAGED
++            : PHP_USER_CACHE_MODE_REQUEST) == FAILURE ||
++        !php_user_cache_startup_default_context_storage()) {
++      return FAILURE;
++    }
++  }
++
+ #ifndef PHP_WIN32
+   if (result == SUCCESS) {
+     const int signals[] = {SIGSEGV, SIGBUS, SIGFPE};
+@@ -1517,7 +1571,16 @@ static void *php_thread(void *arg) {
+ 
+       frankenphp_update_request_context();
+ 
++      if (uc_adapter_managed &&
++          php_user_cache_execution_prepare(is_worker_thread
++              ? PHP_USER_CACHE_EXECUTION_PERSISTENT
++              : PHP_USER_CACHE_EXECUTION_REQUEST, NULL) == FAILURE) {
++        zend_bailout();
++      }
+       if (UNEXPECTED(php_request_startup() == FAILURE)) {
++        if (uc_adapter_managed) {
++          php_user_cache_execution_cancel_prepare();
++        }
+         /* Request startup failed, bail out to zend_catch */
+         frankenphp_log_message("Request startup failed, thread is unhealthy",
+                                LOG_ERR);
+@@ -1538,6 +1601,8 @@ static void *php_thread(void *arg) {
+ 
+       /* Execute the PHP script, potential bailout to zend_catch */
+       php_execute_script(&file_handle);
++      /* exit/fatal paths can be caught inside php_execute_script. */
++      uc_adapter_abort();
+ #ifndef PHP_WIN32
+       if (UNEXPECTED(is_forked_child)) {
+         _exit(EG(exit_status));
+@@ -1578,6 +1643,7 @@ static void *php_thread(void *arg) {
+     }
+ #endif
+ 
++    uc_adapter_abort();
+     /* Critical failure from php_execute_script or php_request_shutdown, mark
+      * the thread as unhealthy */
+     thread_is_healthy = false;

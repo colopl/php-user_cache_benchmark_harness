@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/BenchmarkComparison.php';
+
 final class UcPerformanceReport
 {
 	private ?string $cliReadPath = null;
@@ -10,6 +12,8 @@ final class UcPerformanceReport
 	private array $fpmOncePaths = [];
 	private array $fpmHotPaths = [];
 	private array $bulkPaths = [];
+	private ?string $persistencePath = null;
+	private ?string $cpus = null;
 	private string $output;
 
 	public function __construct()
@@ -27,6 +31,7 @@ final class UcPerformanceReport
 		$fpmOnceRuns = $this->readFpmRuns($this->fpmOncePaths);
 		$fpmHotRuns = $this->readFpmRuns($this->fpmHotPaths);
 		$bulkRuns = array_map(fn (string $path): array => ['path' => $path, 'data' => $this->readJson($path)], $this->bulkPaths);
+		$persistence = $this->persistencePath !== null ? $this->readPersistence($this->persistencePath) : null;
 
 		if ($cliWrite === null && $cliRead !== null && ($cliRead['write'] ?? []) !== []) {
 			$cliWrite = $cliRead;
@@ -36,11 +41,12 @@ final class UcPerformanceReport
 			throw new RuntimeException('No benchmark result files were provided');
 		}
 
-		$html = $this->render($cliRead, $cliWrite, $resident, $fpmOnceRuns, $fpmHotRuns, $bulkRuns);
+		/* Links to related reports are relative to the resolved output directory. */
 		$dir = dirname($this->output);
 		if (!is_dir($dir) && !mkdir($dir, 0777, true) && !is_dir($dir)) {
 			throw new RuntimeException('Unable to create output directory: ' . $dir);
 		}
+		$html = $this->render($cliRead, $cliWrite, $resident, $fpmOnceRuns, $fpmHotRuns, $bulkRuns, $persistence);
 		file_put_contents($this->output, $html);
 		echo 'Wrote HTML report: ' . $this->output . "\n";
 
@@ -70,6 +76,12 @@ final class UcPerformanceReport
 				case '--bulk':
 					$this->bulkPaths[] = $this->absolutePath($this->value($argv, ++$i, $arg));
 					break;
+				case '--persistence':
+					$this->persistencePath = $this->absolutePath($this->value($argv, ++$i, $arg));
+					break;
+				case '--cpus':
+					$this->cpus = $this->value($argv, ++$i, $arg);
+					break;
 				case '--output':
 					$this->output = $this->absolutePath($this->value($argv, ++$i, $arg));
 					break;
@@ -85,7 +97,9 @@ final class UcPerformanceReport
 
 	private function usage(): void
 	{
-		fwrite(STDOUT, "Usage: php scripts/render_user_cache_performance_report.php [--cli-read FILE] [--cli-write FILE] [--resident FILE] [--fpm-once FILE] [--fpm-hot FILE] [--bulk FILE]... [--output FILE]\n");
+		fwrite(STDOUT, "Usage: php scripts/render_user_cache_performance_report.php [--cli-read FILE] [--cli-write FILE] [--resident FILE] [--fpm-once FILE] [--fpm-hot FILE] [--bulk FILE]... [--persistence FILE] [--cpus LIST] [--output FILE]\n"
+			. "  --persistence FILE   BENCH_RESULT_PERSISTENCE.html (embedded aggregate JSON) or its result.json; adds a FrankenPHP summary\n"
+			. "  --cpus LIST          CPU set the measurements were pinned to\n");
 	}
 
 	private function readFpmRuns(array $paths): array
@@ -103,7 +117,7 @@ final class UcPerformanceReport
 		return $runs;
 	}
 
-	private function render(?array $cliRead, ?array $cliWrite, ?array $resident, array $fpmOnceRuns, array $fpmHotRuns, array $bulkRuns): string
+	private function render(?array $cliRead, ?array $cliWrite, ?array $resident, array $fpmOnceRuns, array $fpmHotRuns, array $bulkRuns, ?array $persistence): string
 	{
 		$cards = [];
 		if ($cliRead !== null) {
@@ -242,6 +256,10 @@ td.num, th.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+td.winner-cell { background: var(--accent-soft); }
+td.slower-cell { background: var(--warn-soft); }
+.ranking { display: block; white-space: nowrap; }
+.memory-best { background: var(--accent-soft); font-weight: 700; }
 .winner {
   color: var(--accent);
   font-weight: 700;
@@ -279,13 +297,17 @@ code {
 <body>
 <main>
 <h1>UserCache\Cache Performance Report</h1>
-<p>Generated at <code>' . self::h(gmdate(DATE_ATOM)) . '</code>. Times are in microseconds; lower is faster.</p>
+<p>Generated at <code>' . self::h(gmdate(DATE_ATOM)) . '</code>. Times are in microseconds; lower is faster. Faster lists every measured backend in ascending time order: 1.00x is fastest, and each other ratio is its time divided by the fastest time. Green cells mark the fastest measurements, including ties.</p>
+' . $this->relatedReports() . '
 <div class="cards">' . implode('', $cards) . '</div>
+' . $this->headToHeadSection('apcu_igbinary', $cliRead, $cliWrite, $fpmOnceRuns, $fpmHotRuns, $bulkRuns) . '
+' . $this->persistenceSection($persistence) . '
 ' . $this->environmentSection($cliRead, $fpmOnceRuns, $fpmHotRuns) . '
 ' . ($cliRead !== null ? $this->cacheReadTable('CLI Repeated Read', $cliRead['read'] ?? [], 'median_us', 'mean_operation_us', false, null, 'mean') : '') . '
 ' . ($cliWrite !== null ? $this->cacheReadTable('CLI Store', $cliWrite['write'] ?? [], 'median_us', 'mean_store_us', false, 'store-tradeoff-note', 'mean') : '') . '
 ' . $this->fpmTables('FPM One Fetch Per Request', $fpmOnceRuns) . '
 ' . $this->fpmTables('FPM Hot Read', $fpmHotRuns) . '
+' . UcBenchComparison::memoryTable($cliRead['read'] ?? [], $this->backendLabel(...)) . '
 ' . $this->residentTable($resident, $cliRead) . '
 ' . $this->bulkTables($bulkRuns) . '
 ' . $this->artifactTable() . '
@@ -333,6 +355,18 @@ code {
 			'user_cache.shm_size' => (string) ($ini['user_cache.shm_size'] ?? ''),
 			'Loaded extensions' => $loaded !== [] ? implode(', ', $loaded) : 'none',
 		];
+		if (isset($cliRead['aggregation'])) {
+			$rows['Aggregation'] = (string) $cliRead['aggregation'];
+		}
+		if ($this->cpus !== null) {
+			$rows['CPU affinity'] = $this->cpus;
+		}
+
+		foreach (['apc.shm_size', 'yac.serializer', 'yac.compress_threshold', 'yac.keys_memory_size', 'yac.values_memory_size'] as $key) {
+			if (isset($ini[$key])) {
+				$rows[$key] = (string) $ini[$key];
+			}
+		}
 
 		$html = '<h2>Environment</h2><table><tbody>';
 		foreach ($rows as $key => $value) {
@@ -340,6 +374,312 @@ code {
 		}
 
 		return $html . '</tbody></table>';
+	}
+
+	private function relatedReports(): string
+	{
+		if ($this->persistencePath === null || !$this->isHtml($this->persistencePath)) {
+			return '';
+		}
+
+		return '<p class="note">Related report: <a href="' . self::h($this->relativeHref($this->persistencePath)) . '">FrankenPHP persistence comparison</a></p>';
+	}
+
+	private function headToHeadSection(string $backend, ?array $cliRead, ?array $cliWrite, array $fpmOnceRuns, array $fpmHotRuns, array $bulkRuns): string
+	{
+		$sections = [
+			'CLI repeated read' => $this->speedups($cliRead['read'] ?? [], 'median_us', $backend),
+			'FPM one fetch/request' => $this->fpmSpeedups($fpmOnceRuns, $backend),
+			'FPM hot read' => $this->fpmSpeedups($fpmHotRuns, $backend),
+			'CLI store' => $this->speedups($cliWrite['write'] ?? [], 'median_us', $backend),
+		];
+		$sections = array_filter($sections, static fn (array $speedups): bool => $speedups !== []);
+		$bulk = $this->bulkHeadToHeadRows($bulkRuns, $backend);
+		if ($sections === [] && $bulk === '') {
+			return '';
+		}
+
+		$label = $this->backendLabel($backend);
+		$html = '<h2 id="summary-' . self::h(str_replace('_', '-', $backend)) . '">UserCache vs ' . self::h($label) . '</h2>'
+			. '<p>Speedup is the ' . self::h($label) . ' median divided by the UserCache median from the same measurement session; above 1.00x UserCache is faster. FPM rows pair UserCache with the run that used the same APCu serializer. The geometric mean weighs every workload equally.</p>';
+		if ($sections !== []) {
+			$html .= '<table><thead><tr><th>Section</th><th class="num">Workloads</th><th class="num">UserCache faster</th><th class="num">Geomean speedup</th><th class="num">Lowest</th><th class="num">Highest</th></tr></thead><tbody>';
+			foreach ($sections as $title => $speedups) {
+				$faster = count(array_filter($speedups, static fn (float $speedup): bool => $speedup > 1.0));
+				$lowest = array_keys($speedups, min($speedups), true)[0];
+				$highest = array_keys($speedups, max($speedups), true)[0];
+				$note = $title === 'CLI store' ? '<a class="note-link" href="#store-tradeoff-note">store trade-off note</a>' : '';
+				$html .= '<tr><td>' . self::h($title) . $note . '</td>'
+					. '<td class="num">' . count($speedups) . '</td>'
+					. '<td class="num">' . $faster . '/' . count($speedups) . '</td>'
+					. $this->speedupCell($this->geomean($speedups))
+					. '<td class="num">' . self::h($this->speedup($speedups[$lowest])) . '<span class="small">' . $this->ident((string) $lowest) . '</span></td>'
+					. '<td class="num">' . self::h($this->speedup($speedups[$highest])) . '<span class="small">' . $this->ident((string) $highest) . '</span></td></tr>';
+			}
+			$html .= '</tbody></table>';
+
+			$cases = [];
+			foreach ($sections as $speedups) {
+				$cases += array_fill_keys(array_keys($speedups), true);
+			}
+			$html .= '<table><thead><tr><th>Workload</th>';
+			foreach (array_keys($sections) as $title) {
+				$html .= '<th class="num">' . self::h($title) . '</th>';
+			}
+			$html .= '</tr></thead><tbody>';
+			foreach (array_keys($cases) as $case) {
+				$html .= '<tr><td>' . $this->workloadLink((string) $case) . '</td>';
+				foreach ($sections as $speedups) {
+					$html .= isset($speedups[$case]) ? $this->speedupCell($speedups[$case]) : '<td class="num"><span class="muted">n/a</span></td>';
+				}
+				$html .= '</tr>';
+			}
+			$html .= '</tbody></table>';
+		}
+
+		return $html . $bulk;
+	}
+
+	private function speedups(array $rows, string $metric, string $backend): array
+	{
+		$speedups = [];
+		foreach ($this->groupRows($rows) as $case => $caseRows) {
+			$userValue = (float) ($caseRows['user_cache'][$metric] ?? 0.0);
+			$backendValue = (float) ($caseRows[$backend][$metric] ?? 0.0);
+			if ($userValue > 0.0 && $backendValue > 0.0) {
+				$speedups[$case] = $backendValue / $userValue;
+			}
+		}
+
+		return $speedups;
+	}
+
+	private function fpmSpeedups(array $runs, string $backend): array
+	{
+		$speedups = [];
+		foreach ($runs as $run) {
+			$speedups += $this->speedups($run['data']['results'] ?? [], 'median_server_us_per_op', $backend);
+		}
+
+		return $speedups;
+	}
+
+	private function bulkHeadToHeadRows(array $bulkRuns, string $backend): string
+	{
+		$columns = [
+			'user_cache_fetch_multiple',
+			'user_cache_fetch_loop',
+			$backend . '_fetch_multiple',
+			$backend . '_fetch_loop',
+		];
+		$rows = '';
+		foreach ($bulkRuns as $bulkRun) {
+			$values = [];
+			foreach ($bulkRun['data']['rows'] ?? [] as $row) {
+				$values[(string) $row['backend']] = (float) $row['median_us_per_batch'];
+			}
+			if (!isset($values[$columns[0]], $values[$columns[2]]) || $values[$columns[0]] <= 0.0) {
+				continue;
+			}
+			$rows .= '<tr><td>' . self::h((string) ($bulkRun['data']['options']['key_count'] ?? '?')) . '</td>';
+			foreach ($columns as $column) {
+				$rows .= '<td class="num">' . (isset($values[$column]) ? self::h($this->number($values[$column], 3)) . ' us' : '<span class="muted">n/a</span>') . '</td>';
+			}
+			$rows .= $this->speedupCell($values[$columns[2]] / $values[$columns[0]]) . '</tr>';
+		}
+		if ($rows === '') {
+			return '';
+		}
+
+		$html = '<h3>Bulk read, median per batch</h3><table><thead><tr><th>Keys</th>';
+		foreach ($columns as $column) {
+			$html .= '<th class="num">' . self::h($this->backendLabel($column)) . '</th>';
+		}
+
+		return $html . '<th class="num">Speedup (array vs array)</th></tr></thead><tbody>' . $rows . '</tbody></table>';
+	}
+
+	private function persistenceSection(?array $data): string
+	{
+		if ($data === null) {
+			return '';
+		}
+
+		$config = is_array($data['configuration'] ?? null) ? $data['configuration'] : [];
+		$aaRatios = [];
+		foreach ($data['aa'] as $row) {
+			$aaRatios[$this->persistenceCaseKey($row)] = (float) $row['paired_ratio']['median'];
+		}
+		$pairs = (string) ($config['pairs'] ?? '?') . ' pairs × ' . (string) ($config['sessions'] ?? '?') . ' sessions';
+		$conditions = [
+			'Mode ' . (string) ($config['mode'] ?? 'worker'),
+			'micro ' . $pairs,
+			'A/A ' . (string) ($data['aa'][0]['pairs'] ?? '?') . ' pairs',
+			'HTTP ' . (string) ($config['rounds'] ?? '?') . ' rounds × ' . (string) ($config['seconds'] ?? '?') . ' s',
+			'CPUs ' . (string) ($config['cpus'] ?? 'all'),
+			'FrankenPHP ' . substr((string) ($data['build_manifest']['inputs']['frankenphp_revision'] ?? '?'), 0, 12),
+			'measured ' . preg_replace('/\.\d+/', '', (string) ($data['created_at'] ?? '?')),
+		];
+
+		$html = '<h2 id="summary-frankenphp">UserCache vs FrankenPHP zval.h reference</h2>';
+		if ($data['smoke_only'] !== false || $data['status'] !== 'complete') {
+			$html .= '<p class="note warn">This persistence result is ' . ($data['smoke_only'] !== false ? 'a smoke run' : 'incomplete') . ' and is not performance evidence.</p>';
+		}
+		$html .= '<p>PHP fetch batches compare UserCache with a reference cache built on the official FrankenPHP zval.h helpers in persistent worker threads. Micro ratios are UserCache time divided by reference time (below 1.00x UserCache is faster); HTTP ratios are UserCache throughput divided by reference throughput (above 1.00x UserCache is faster). Each ratio is the median of matched pairs; a cell is colored only when its bootstrap 95% interval excludes 1.00x.'
+			. ($this->persistencePath !== null && $this->isHtml($this->persistencePath) ? ' Per-case timings, memory, A/A noise and provenance are in the <a href="' . self::h($this->relativeHref($this->persistencePath)) . '">FrankenPHP persistence report</a>.' : '')
+			. '</p><p class="note"><code>' . self::h(implode(' · ', $conditions)) . '</code></p>';
+
+		$microGroups = [
+			'All PHP fetch batches' => $data['micro'],
+			'Read' => array_filter($data['micro'], static fn (array $row): bool => !$row['mutate']),
+			'Fetch and mutate' => array_filter($data['micro'], static fn (array $row): bool => (bool) $row['mutate']),
+		];
+		$html .= '<table><thead><tr><th>Cases</th><th class="num">Count</th><th class="num">UserCache faster</th><th class="num">Inconclusive</th><th class="num">Reference faster</th><th class="num">Geomean UserCache / reference</th></tr></thead><tbody>';
+		foreach ($microGroups as $title => $rows) {
+			$html .= $this->persistenceSummaryRow($title, $rows, 'paired_ratio', true);
+		}
+		$html .= $this->persistenceSummaryRow('HTTP worker scaling (throughput)', $data['http'], 'paired_throughput_ratio', false);
+		$html .= '</tbody></table>';
+		if ($aaRatios !== []) {
+			$noisy = array_filter($aaRatios, static fn (float $ratio): bool => abs($ratio - 1.0) > 0.02);
+			$html .= '<p>A/A (the reference compared with itself) medians range from ' . self::h($this->number(min($aaRatios), 3) . 'x to ' . $this->number(max($aaRatios), 3) . 'x')
+				. ($noisy !== [] ? '; cases marked † exceed ±2% and their ratios carry that much noise.' : '.') . '</p>';
+		}
+
+		return $html . $this->persistenceMicroMatrix($data['micro'], $aaRatios, is_array($config['payloads'] ?? null) ? $config['payloads'] : []) . $this->persistenceHttpMatrix($data['http']);
+	}
+
+	private function persistenceSummaryRow(string $title, array $rows, string $ratioKey, bool $lowerIsBetter): string
+	{
+		if ($rows === []) {
+			return '';
+		}
+
+		$counts = ['user_cache' => 0, 'inconclusive' => 0, 'reference' => 0];
+		$ratios = [];
+		foreach ($rows as $row) {
+			$ratios[] = (float) $row[$ratioKey]['median'];
+			$counts[$this->persistenceWinner($row['median_ratio_ci95'] ?? null, $lowerIsBetter)]++;
+		}
+		$geomean = $this->geomean($ratios);
+		$better = $lowerIsBetter ? $geomean < 1.0 : $geomean > 1.0;
+
+		return '<tr><td>' . self::h($title) . '</td>'
+			. '<td class="num">' . count($rows) . '</td>'
+			. '<td class="num">' . $counts['user_cache'] . '</td>'
+			. '<td class="num">' . $counts['inconclusive'] . '</td>'
+			. '<td class="num">' . $counts['reference'] . '</td>'
+			. '<td class="num' . ($better ? ' winner-cell' : '') . '">' . self::h($this->number($geomean, 3)) . 'x</td></tr>';
+	}
+
+	private function persistenceWinner(?array $interval, bool $lowerIsBetter): string
+	{
+		if ($interval === null || count($interval) !== 2) {
+			return 'inconclusive';
+		}
+		if ((float) $interval[1] < 1.0) {
+			return $lowerIsBetter ? 'user_cache' : 'reference';
+		}
+		if ((float) $interval[0] > 1.0) {
+			return $lowerIsBetter ? 'reference' : 'user_cache';
+		}
+
+		return 'inconclusive';
+	}
+
+	private function persistenceMicroMatrix(array $rows, array $aaRatios, array $payloadOrder): string
+	{
+		$shapes = [];
+		$payloads = array_fill_keys(array_map('strval', $payloadOrder), []);
+		foreach ($rows as $row) {
+			$shape = [(int) $row['keys'], $row['temperature'] === 'warm' ? 0 : 1, (int) (bool) $row['mutate'], (int) $row['ttl']];
+			$shapes[implode('|', $shape)] = $shape;
+			$payloads[(string) $row['payload']][implode('|', $shape)] = $row;
+		}
+		$payloads = array_filter($payloads, static fn (array $cells): bool => $cells !== []);
+		uasort($shapes, static fn (array $a, array $b): int => $a <=> $b);
+
+		$html = '<h3>PHP fetch batches, UserCache / reference time</h3><table><thead><tr><th>Payload</th>';
+		foreach ($shapes as $shape) {
+			$html .= '<th class="num">' . self::h($this->number($shape[0], 0) . ($shape[0] === 1 ? ' key' : ' keys') . ', ' . ($shape[1] === 0 ? 'warm' : 'cold') . ', ' . ($shape[2] === 1 ? 'mutate' : 'read') . ($shape[3] > 0 ? ', TTL ' . $shape[3] : '')) . '</th>';
+		}
+		$html .= '</tr></thead><tbody>';
+		foreach ($payloads as $payload => $cells) {
+			$html .= '<tr><td><code>' . self::h($payload) . '</code></td>';
+			foreach (array_keys($shapes) as $shapeKey) {
+				if (!isset($cells[$shapeKey])) {
+					$html .= '<td class="num"><span class="muted">-</span></td>';
+					continue;
+				}
+				$row = $cells[$shapeKey];
+				$noise = $aaRatios[$this->persistenceCaseKey($row)] ?? null;
+				$html .= $this->persistenceRatioCell($row['paired_ratio']['median'], $row['median_ratio_ci95'] ?? null, true, $noise !== null && abs($noise - 1.0) > 0.02);
+			}
+			$html .= '</tr>';
+		}
+
+		return $html . '</tbody></table>';
+	}
+
+	private function persistenceHttpMatrix(array $rows): string
+	{
+		if ($rows === []) {
+			return '';
+		}
+
+		$shapes = [];
+		$kinds = [];
+		foreach ($rows as $row) {
+			$shape = [(int) $row['workers'], (int) $row['operations']];
+			$shapes[implode('|', $shape)] = $shape;
+			$kinds[(string) $row['kind'] . ' / ' . ($row['mixed'] ? '99% read + 1% store' : 'read')][implode('|', $shape)] = $row;
+		}
+		uasort($shapes, static fn (array $a, array $b): int => $a <=> $b);
+
+		$html = '<h3>HTTP worker scaling, UserCache / reference throughput</h3>'
+			. '<p>The Go HTTP client and FrankenPHP workers share the pinned CPU set, so intervals widen as workers grow.</p>'
+			. '<table><thead><tr><th>Fixture / mix</th>';
+		foreach ($shapes as $shape) {
+			$html .= '<th class="num">' . self::h($shape[0] . ($shape[0] === 1 ? ' worker' : ' workers') . ', ' . $shape[1] . ($shape[1] === 1 ? ' op/request' : ' ops/request')) . '</th>';
+		}
+		$html .= '</tr></thead><tbody>';
+		foreach ($kinds as $kind => $cells) {
+			$html .= '<tr><td>' . self::h($kind) . '</td>';
+			foreach (array_keys($shapes) as $shapeKey) {
+				$html .= isset($cells[$shapeKey])
+					? $this->persistenceRatioCell($cells[$shapeKey]['paired_throughput_ratio']['median'], $cells[$shapeKey]['median_ratio_ci95'] ?? null, false, false)
+					: '<td class="num"><span class="muted">-</span></td>';
+			}
+			$html .= '</tr>';
+		}
+
+		return $html . '</tbody></table>';
+	}
+
+	private function persistenceRatioCell(float|int $ratio, ?array $interval, bool $lowerIsBetter, bool $noisy): string
+	{
+		$class = match ($this->persistenceWinner($interval, $lowerIsBetter)) {
+			'user_cache' => ' winner-cell',
+			'reference' => ' slower-cell',
+			default => '',
+		};
+		$range = $interval !== null && count($interval) === 2
+			? '<span class="small">' . self::h($this->number((float) $interval[0], 3) . '–' . $this->number((float) $interval[1], 3)) . '</span>'
+			: '';
+
+		return '<td class="num' . $class . '">' . self::h($this->number((float) $ratio, 3) . 'x' . ($noisy ? ' †' : '')) . $range . '</td>';
+	}
+
+	private function persistenceCaseKey(array $row): string
+	{
+		return implode('|', [(string) $row['payload'], (string) $row['keys'], (string) $row['temperature'], $row['mutate'] ? '1' : '0', (string) $row['ttl']]);
+	}
+
+	private function speedupCell(float $speedup): string
+	{
+		$class = $speedup > 1.0 ? ' winner-cell' : ($speedup < 1.0 ? ' slower-cell' : '');
+
+		return '<td class="num' . $class . '">' . self::h($this->speedup($speedup)) . '</td>';
 	}
 
 	private function winnerCard(string $title, array $rows, string $metric): string
@@ -429,24 +769,22 @@ code {
 		foreach ($backendNames as $backendName) {
 			$html .= '<th class="num">' . self::h($this->backendLabel($backendName)) . '</th>';
 		}
-		$html .= '<th class="num">Faster/UserCache</th>'
+		$html .= '<th class="num">Faster</th>'
 			. ($showWorkers ? '<th class="num">Workers</th>' : '')
 			. '</tr></thead><tbody>';
 
 		foreach ($groups as $case => $caseRows) {
 			$bestBackend = $this->bestBackend($caseRows, $metric);
-			$user = isset($caseRows['user_cache']) ? (float) $caseRows['user_cache'][$metric] : null;
 			$workers = isset($caseRows['user_cache']['worker_count']) ? (string) $caseRows['user_cache']['worker_count'] : '';
 			$bestValue = $bestBackend !== null && isset($caseRows[$bestBackend][$metric]) ? (float) $caseRows[$bestBackend][$metric] : null;
-			$fasterRatio = $user !== null && $user > 0.0 && $bestValue !== null && $bestValue > 0.0 ? $user / $bestValue : null;
 			$noteLink = $apcuLossAnchor !== null && $bestBackend !== null && $bestBackend !== 'user_cache'
 				? '<a class="note-link" href="#' . self::h($apcuLossAnchor) . '">store trade-off note</a>'
 				: '';
 			$html .= '<tr><td>' . $this->workloadLink($case) . $noteLink . '</td>';
 			foreach ($backendNames as $backendName) {
-				$html .= $this->metricCell($caseRows[$backendName] ?? null, $metric, $secondaryMetric, $secondaryLabel, $bestBackend === $backendName);
+				$html .= $this->metricCell($caseRows[$backendName] ?? null, $metric, $secondaryMetric, $secondaryLabel, isset($caseRows[$backendName][$metric]) && $bestValue !== null && (float) $caseRows[$backendName][$metric] === $bestValue);
 			}
-			$html .= '<td class="num">' . ($fasterRatio !== null && $bestBackend !== null ? self::h($this->number($fasterRatio, 2) . 'x (' . $this->backendLabel($bestBackend) . ')') : '<span class="muted">n/a</span>') . '</td>'
+			$html .= '<td class="num">' . UcBenchComparison::fasterCell($caseRows, $metric, $this->backendLabel(...)) . '</td>'
 				. ($showWorkers ? '<td class="num">' . self::h($workers) . '</td>' : '')
 				. '</tr>';
 		}
@@ -466,7 +804,7 @@ code {
 			? 'p25-p75 ' . $this->number((float) $row['p25_server_us_per_op'], 3) . '-' . $this->number((float) $row['p75_server_us_per_op'], 3)
 			: null;
 
-		return '<td class="num"><span' . $class . '>' . self::h($this->number((float) $row[$metric], 3)) . ' us</span>'
+		return '<td class="num' . ($winner ? ' winner-cell' : '') . '"><span' . $class . '>' . self::h($this->number((float) $row[$metric], 3)) . ' us</span>'
 			. ($secondary !== null ? '<span class="small">' . self::h($secondaryLabel . ' ' . $this->number($secondary, 3)) . '</span>' : '')
 			. ($interquartile !== null ? '<span class="small">' . self::h($interquartile) . '</span>' : '')
 			. '</td>';
@@ -525,11 +863,11 @@ code {
 			$keyCount = (string) ($data['options']['key_count'] ?? '?');
 			$html .= '<h2><a class="workload-link" href="#' . self::h($this->bulkWorkloadId($keyCount)) . '">Bulk Read: ' . self::h($keyCount) . ' Keys</a></h2><table class="bulk-table"><thead><tr><th>Backend</th><th class="num">Median/batch</th><th class="num">Mean/batch</th><th class="num">Mean/key</th></tr></thead><tbody>';
 			$rows = $data['rows'] ?? [];
-			$bestBackend = $this->bestBackendByRows($rows, 'backend', 'median_us_per_batch');
+			$values = UcBenchComparison::metricValues($rows, 'median_us_per_batch');
 			foreach ($rows as $row) {
-				$winner = $bestBackend === ($row['backend'] ?? null);
+				$winner = $values !== [] && (float) $row['median_us_per_batch'] === reset($values);
 				$html .= '<tr><td><code>' . $this->ident((string) $row['backend']) . '</code><span class="small">' . self::h($this->backendLabel((string) $row['backend'])) . '</span></td>'
-					. '<td class="num' . ($winner ? ' winner' : '') . '">' . self::h($this->number((float) $row['median_us_per_batch'], 3)) . ' us</td>'
+					. '<td class="num' . ($winner ? ' winner winner-cell' : '') . '">' . self::h($this->number((float) $row['median_us_per_batch'], 3)) . ' us</td>'
 					. '<td class="num">' . self::h($this->number((float) $row['mean_us_per_batch'], 3)) . ' us</td>'
 					. '<td class="num">' . self::h($this->number((float) $row['mean_us_per_key'], 3)) . ' us</td></tr>';
 			}
@@ -555,6 +893,7 @@ code {
 		foreach ($this->bulkPaths as $index => $path) {
 			$paths['Bulk read JSON #' . ($index + 1)] = $path;
 		}
+		$paths['FrankenPHP persistence result'] = $this->persistencePath;
 
 		$html = '<h2>Artifacts</h2><table><thead><tr><th>Artifact</th><th>Path</th></tr></thead><tbody>';
 		foreach ($paths as $label => $path) {
@@ -613,7 +952,7 @@ code {
 			$data = $bulkRun['data'];
 			$keyCount = (string) ($data['options']['key_count'] ?? '?');
 			$operations = (string) ($data['options']['operations'] ?? '?');
-			$description = 'Uses the multi-key config payload, primes ' . $keyCount . ' keys before timing, then repeatedly fetches all keys as a batch. UserCache is measured with fetchMultiple() and with a per-key fetch() loop; APCu is measured with apcu_fetch(array) and with a per-key loop.';
+			$description = 'Uses the multi-key config payload, primes ' . $keyCount . ' keys before timing, then repeatedly fetches all keys as a batch. UserCache is measured with fetchMultiple() and with a per-key fetch() loop; APCu is measured with apcu_fetch(array) and with a per-key loop, once per serializer (php and, when igbinary is available, igbinary); Yac is measured with get(array) and with a per-key loop.';
 			$html .= '<tr id="' . self::h($this->bulkWorkloadId($keyCount)) . '"><td><code>bulk_read_' . self::h($keyCount) . '_keys</code><span class="small">Bulk Read: ' . self::h($keyCount) . ' Keys</span></td>'
 				. '<td>' . self::h($description) . '<span class="small">Measured batches per iteration: ' . self::h($operations) . '</span></td>'
 				. '<td>Bulk read</td></tr>';
@@ -646,7 +985,7 @@ code {
 
 	private function backendOrderForRows(array $rows): array
 	{
-		$preferred = ['user_cache', 'apcu', 'apcu_igbinary'];
+		$preferred = ['user_cache', 'apcu', 'apcu_igbinary', 'yac'];
 		$seen = [];
 		foreach ($rows as $row) {
 			if (isset($row['backend'])) {
@@ -674,10 +1013,15 @@ code {
 			'user_cache' => 'UserCache',
 			'apcu' => 'APCu/php',
 			'apcu_igbinary' => 'APCu/igbinary',
+			'yac' => 'Yac/php',
+			'yac_fetch_multiple' => 'Yac get array',
+			'yac_fetch_loop' => 'Yac get loop',
 			'user_cache_fetch_multiple' => 'UserCache fetchMultiple',
 			'user_cache_fetch_loop' => 'UserCache fetch loop',
-			'apcu_fetch_multiple' => 'APCu fetch array',
-			'apcu_fetch_loop' => 'APCu fetch loop',
+			'apcu_fetch_multiple' => 'APCu/php fetch array',
+			'apcu_fetch_loop' => 'APCu/php fetch loop',
+			'apcu_igbinary_fetch_multiple' => 'APCu/igbinary fetch array',
+			'apcu_igbinary_fetch_loop' => 'APCu/igbinary fetch loop',
 			default => $backend,
 		};
 	}
@@ -750,38 +1094,8 @@ code {
 
 	private function bestBackend(array $rowsByBackend, string $metric): ?string
 	{
-		$best = null;
-		$bestValue = null;
-		foreach ($rowsByBackend as $backend => $row) {
-			if (!isset($row[$metric])) {
-				continue;
-			}
-			$value = (float) $row[$metric];
-			if ($bestValue === null || $value < $bestValue) {
-				$best = (string) $backend;
-				$bestValue = $value;
-			}
-		}
-
-		return $best;
-	}
-
-	private function bestBackendByRows(array $rows, string $backendField, string $metric): ?string
-	{
-		$best = null;
-		$bestValue = null;
-		foreach ($rows as $row) {
-			if (!isset($row[$backendField], $row[$metric])) {
-				continue;
-			}
-			$value = (float) $row[$metric];
-			if ($bestValue === null || $value < $bestValue) {
-				$best = (string) $row[$backendField];
-				$bestValue = $value;
-			}
-		}
-
-		return $best;
+		$values = UcBenchComparison::metricValues($rowsByBackend, $metric);
+		return array_key_first($values);
 	}
 
 	private function readJson(string $path): array
@@ -796,6 +1110,52 @@ code {
 		}
 
 		return $data;
+	}
+
+	private function readPersistence(string $path): array
+	{
+		if (!$this->isHtml($path)) {
+			$data = $this->readJson($path);
+		} else {
+			$contents = file_get_contents($path);
+			if ($contents === false) {
+				throw new RuntimeException('Unable to read persistence report: ' . $path);
+			}
+			/* The persistence report escapes '<' inside its embedded JSON, so the first closing tag ends it. */
+			if (!preg_match('#<script id="embedded-result" type="application/json">(.*?)</script>#s', $contents, $match)) {
+				throw new RuntimeException('Persistence report has no embedded aggregate JSON: ' . $path);
+			}
+			$data = json_decode($match[1], true, 512, JSON_THROW_ON_ERROR);
+		}
+		if (!is_array($data) || ($data['schema_version'] ?? null) !== 1 || !is_bool($data['smoke_only'] ?? null) || !isset($data['status'])) {
+			throw new RuntimeException('Unsupported persistence result schema: ' . $path);
+		}
+		foreach (['micro', 'aa', 'http'] as $section) {
+			if (!is_array($data[$section] ?? null)) {
+				throw new RuntimeException('Persistence result is missing section ' . $section . ': ' . $path);
+			}
+		}
+
+		return $data;
+	}
+
+	private function isHtml(string $path): bool
+	{
+		return preg_match('/\.html?$/i', $path) === 1;
+	}
+
+	private function relativeHref(string $target): string
+	{
+		$split = static fn (string $path): array => array_values(array_filter(explode('/', (realpath($path) ?: $path)), static fn (string $part): bool => $part !== ''));
+		$from = $split(dirname($this->output));
+		$to = $split($target);
+		$common = 0;
+		while ($common < count($from) && $common < count($to) - 1 && $from[$common] === $to[$common]) {
+			$common++;
+		}
+		$parts = array_merge(array_fill(0, count($from) - $common, '..'), array_slice($to, $common));
+
+		return implode('/', array_map('rawurlencode', $parts));
 	}
 
 	private function value(array $argv, int $offset, string $option): string
@@ -834,6 +1194,16 @@ code {
 	private function number(float $value, int $decimals): string
 	{
 		return number_format($value, $decimals, '.', ',');
+	}
+
+	private function speedup(float $value): string
+	{
+		return $this->number($value, $value >= 100.0 ? 0 : ($value >= 10.0 ? 1 : 2)) . 'x';
+	}
+
+	private function geomean(array $values): float
+	{
+		return exp(array_sum(array_map(static fn (float $value): float => log($value), $values)) / count($values));
 	}
 
 	private static function h(string $value): string

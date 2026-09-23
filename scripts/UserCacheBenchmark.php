@@ -1,6 +1,8 @@
 <?php
 
 declare(strict_types=1);
+require_once __DIR__ . '/BenchmarkComparison.php';
+
 const UC_BENCH_VERSION = 'user-cache-benchmark-1';
 
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);
@@ -334,6 +336,8 @@ interface UcBenchBackend
 	public function clear(): void;
 	public function store(string $key, mixed $value): void;
 	public function fetch(string $key): mixed;
+	public function memoryUsed(): ?int;
+	public function memoryReserved(): ?int;
 }
 
 function uc_bench_unavailable_reason_to_string(mixed $reason): ?string
@@ -368,6 +372,17 @@ abstract class UcBenchAbstractBackend implements UcBenchBackend
 {
 	protected bool $available = false;
 	protected ?string $unavailableReason = null;
+
+	/* Not every backend exposes its allocator usage. */
+	public function memoryUsed(): ?int
+	{
+		return null;
+	}
+
+	public function memoryReserved(): ?int
+	{
+		return null;
+	}
 
 	public function available(): bool
 	{
@@ -419,6 +434,16 @@ final class UcBenchUserCacheBackend extends UcBenchAbstractBackend
 		return 'UserCache\Cache store/fetch';
 	}
 
+	public function memoryUsed(): ?int
+	{
+		return UserCache\Cache::getStatus()->getUsedMemory();
+	}
+
+	public function memoryReserved(): ?int
+	{
+		return UserCache\Cache::getStatus()->getSharedMemorySize();
+	}
+
 	public function clear(): void
 	{
 		if ($this->cache === null || !$this->cache->clear()) {
@@ -464,6 +489,18 @@ abstract class UcBenchApcuBasedBackend extends UcBenchAbstractBackend
 	public function label(): string
 	{
 		return $this->backendLabel;
+	}
+
+	public function memoryUsed(): ?int
+	{
+		$info = apcu_sma_info(true);
+		return is_array($info) ? (int) ($info['num_seg'] * $info['seg_size'] - $info['avail_mem']) : null;
+	}
+
+	public function memoryReserved(): ?int
+	{
+		$info = apcu_sma_info(true);
+		return is_array($info) ? (int) ($info['num_seg'] * $info['seg_size']) : null;
 	}
 
 	public function clear(): void
@@ -532,6 +569,73 @@ final class UcBenchApcuBackend extends UcBenchApcuBasedBackend
 	}
 }
 
+final class UcBenchYacBackend extends UcBenchAbstractBackend
+{
+	private ?Yac $cache = null;
+	private static ?stdClass $default = null;
+
+	public function __construct()
+	{
+		if (!extension_loaded('yac')) {
+			$this->unavailable('Yac extension is not loaded');
+			return;
+		}
+		if (version_compare((string) phpversion('yac'), '2.4.0', '<')) {
+			$this->unavailable('Yac 2.4.0 or newer is required for unambiguous cache misses');
+			return;
+		}
+		if (ini_get('yac.serializer') !== 'php' || (int) ini_get('yac.compress_threshold') !== -1) {
+			$this->unavailable('Yac requires yac.serializer=php and yac.compress_threshold=-1');
+			return;
+		}
+		try {
+			$this->cache = new Yac();
+			$this->available = true;
+		} catch (Throwable $exception) {
+			$this->unavailable($exception->getMessage());
+		}
+	}
+
+	public function name(): string
+	{
+		return 'yac';
+	}
+
+	public function label(): string
+	{
+		return 'Yac/php set/get (compression disabled)';
+	}
+
+	public function memoryReserved(): ?int
+	{
+		return $this->cache?->info()['memory_size'] ?? null;
+	}
+
+	public function clear(): void
+	{
+		if ($this->cache === null || !$this->cache->flush()) {
+			throw new RuntimeException('Yac::flush() failed');
+		}
+	}
+
+	public function store(string $key, mixed $value): void
+	{
+		if ($this->cache === null || !$this->cache->set($key, $value)) {
+			throw new RuntimeException('Yac::set() failed for key ' . $key);
+		}
+	}
+
+	public function fetch(string $key): mixed
+	{
+		$default = self::$default ??= new stdClass();
+		$value = $this->cache?->get($key, $default);
+		if ($value === $default) {
+			throw new RuntimeException('Yac::get() missed key ' . $key);
+		}
+		return $value;
+	}
+}
+
 final class UcBenchPayloadFactory
 {
 	private const LARGE_ROW_COUNT = 192;
@@ -540,6 +644,8 @@ final class UcBenchPayloadFactory
 	private const MULTI_KEY_CONFIG_COUNT = 32;
 	private const PRODUCT_CARD_COUNT = 80;
 	private const LARGE_STRING_REPEAT_COUNT = 4096;
+	private const PACKED_VALUE_COUNT = 1024;
+	private const PACKED_OBJECT_INTERVAL = 16;
 
 	private const CONSTANT_ARRAY_PAYLOAD = [
 		'routes' => [
@@ -613,6 +719,14 @@ final class UcBenchPayloadFactory
 				static fn (mixed $payload): string => self::largeObjectDigest($payload),
 				null,
 				static fn (mixed $payload, int $operation): int => self::largeObjectProbe($payload, $operation),
+			),
+			'packed_object_list' => self::case(
+				'Packed list with plain objects',
+				'Dense 1,024-element list with a plain object every 16 elements and scalar values elsewhere.',
+				static fn (): mixed => self::buildPackedObjectList(),
+				static fn (mixed $payload): string => self::packedObjectListDigest($payload),
+				null,
+				static fn (mixed $payload, int $operation): int => self::packedObjectListProbe($payload, $operation),
 			),
 			'metadata_object_read' => self::case(
 				'Application metadata object read',
@@ -1026,6 +1140,38 @@ final class UcBenchPayloadFactory
 		}
 
 		return $rows;
+	}
+
+	private static function buildPackedObjectList(): array
+	{
+		$values = [];
+		for ($index = 0; $index < self::PACKED_VALUE_COUNT; $index++) {
+			$values[] = $index % self::PACKED_OBJECT_INTERVAL === 0
+				? (object) ['index' => $index, 'name' => 'node-' . $index]
+				: $index;
+		}
+
+		return $values;
+	}
+
+	private static function packedObjectListDigest(mixed $payload): string
+	{
+		if (!is_array($payload) || count($payload) !== self::PACKED_VALUE_COUNT || !array_is_list($payload)) {
+			throw new RuntimeException('Packed object list has an unexpected shape');
+		}
+
+		return hash('sha256', serialize($payload));
+	}
+
+	private static function packedObjectListProbe(mixed $payload, int $operation): int
+	{
+		$index = ($operation * self::PACKED_OBJECT_INTERVAL) % self::PACKED_VALUE_COUNT;
+		$node = is_array($payload) ? ($payload[$index] ?? null) : null;
+		if (!$node instanceof stdClass) {
+			throw new RuntimeException('Packed object list is incomplete');
+		}
+
+		return $node->index + strlen($node->name) + $payload[$index + 1];
 	}
 
 	private static function buildLargeString(): string
@@ -2138,7 +2284,7 @@ final class UcBenchPayloadFactory
 
 final class UcBenchRunner
 {
-	private array $backendOrder = ['user_cache', 'apcu', 'apcu_igbinary'];
+	private array $backendOrder = ['user_cache', 'apcu', 'apcu_igbinary', 'yac'];
 
 	public function __construct(private readonly array $options)
 	{
@@ -2385,6 +2531,7 @@ final class UcBenchRunner
 	{
 		return [
 			'user_cache' => new UcBenchUserCacheBackend('benchmark_user_cache'),
+			'yac' => new UcBenchYacBackend(),
 			'apcu' => new UcBenchApcuBackend(),
 			'apcu_igbinary' => new UcBenchApcuBackend(
 				'apcu_igbinary',
@@ -2398,13 +2545,37 @@ final class UcBenchRunner
 	private function measureRead(string $caseName, array $case, UcBenchBackend $backend): array
 	{
 		$key = $this->cacheKey('read', $backend->name(), $caseName);
-		$payload = $case['build']();
-		$expectedDigest = $case['digest']($payload);
 		$samples = [];
 
+		/* With case isolation, this is the fixed startup cost before any store. */
+		$shmBaseline = $backend->memoryUsed();
+
 		$backend->clear();
+		gc_collect_cycles();
+		$heapStoreBase = memory_get_usage();
+		$payload = $case['build']();
+		$expectedDigest = $case['digest']($payload);
+
+		$shmBefore = $backend->memoryUsed();
 		$backend->store($key, $payload);
-		$this->assertDigest($case, $backend->fetch($key), $expectedDigest, $backend->name(), $caseName);
+		$shmAfter = $backend->memoryUsed();
+
+		/* Separate store-seeded state from fetch allocations. The retained
+		 * digest is included and is the same small cost for every backend. */
+		$payload = null;
+		gc_collect_cycles();
+		$storeRetained = memory_get_usage() - $heapStoreBase;
+
+		/* Measure the first fetch separately from warm fetches. A second fetch
+		 * promotes deferred request-local state before the residual snapshot. */
+		$heapBefore = memory_get_usage();
+		$value = $backend->fetch($key);
+		$firstFetchRetained = memory_get_usage() - $heapBefore;
+		$this->assertDigest($case, $value, $expectedDigest, $backend->name(), $caseName);
+		$value = $backend->fetch($key);
+		$value = null;
+		gc_collect_cycles();
+		$requestResidual = memory_get_usage() - $heapBefore;
 
 		for ($i = 0; $i < $this->options['warmup']; $i++) {
 			$this->readSample($backend, $key, $case, $expectedDigest, $caseName);
@@ -2414,7 +2585,7 @@ final class UcBenchRunner
 			$samples[] = $this->readSample($backend, $key, $case, $expectedDigest, $caseName);
 		}
 
-		return $this->row(
+		$row = $this->row(
 			'read',
 			$caseName,
 			$case,
@@ -2423,6 +2594,33 @@ final class UcBenchRunner
 			$samples,
 			'mean_operation_us',
 		);
+
+		$row['value_shm_bytes'] = $shmBefore !== null && $shmAfter !== null
+			? $shmAfter - $shmBefore
+			: null;
+		$row['backend_shm_baseline_bytes'] = $shmBaseline;
+		$row['backend_shm_reserved_bytes'] = $backend->memoryReserved();
+		$row['store_retained_bytes'] = $storeRetained;
+		$row['first_fetch_retained_bytes'] = $firstFetchRetained;
+		$row['fetch_retained_bytes'] = $this->measureFetchRetainedBytes($backend, $key);
+		$row['request_residual_bytes'] = $requestResidual;
+
+		return $row;
+	}
+
+	/* Measure one additional value held in a warm request, outside timed loops. */
+	private function measureFetchRetainedBytes(UcBenchBackend $backend, string $key): int
+	{
+		$value = $backend->fetch($key);
+		$value = null;
+
+		gc_collect_cycles();
+
+		$before = memory_get_usage();
+		$value = $backend->fetch($key);
+		$after = memory_get_usage();
+
+		return $after - $before;
 	}
 
 	private function readSample(UcBenchBackend $backend, string $key, array $case, string $expectedDigest, string $caseName): float
@@ -2633,7 +2831,8 @@ final class UcBenchRunner
 
 	private function cacheKey(string $mode, string $backend, string $caseName): string
 	{
-		return 'user_cache_benchmark.' . UC_BENCH_VERSION . '.' . $mode . '.' . $backend . '.' . $caseName;
+		/* Hash outside timed loops; leave room for write indexes within Yac's 48-byte limit. */
+		return substr(hash('sha256', UC_BENCH_VERSION . '.' . $mode . '.' . $backend . '.' . $caseName), 0, 24);
 	}
 
 	private function environment(): array
@@ -2655,6 +2854,13 @@ final class UcBenchRunner
 				'opcache.enable_cli' => ini_get('opcache.enable_cli'),
 				'user_cache.shm_size' => ini_get('user_cache.shm_size'),
 				'apc.enable_cli' => ini_get('apc.enable_cli'),
+				'apc.shm_size' => ini_get('apc.shm_size'),
+				'yac.enable_cli' => ini_get('yac.enable_cli'),
+				'yac.serializer' => ini_get('yac.serializer'),
+				'yac.compress_threshold' => ini_get('yac.compress_threshold'),
+				'yac.keys_memory_size' => ini_get('yac.keys_memory_size'),
+				'yac.values_memory_size' => ini_get('yac.values_memory_size'),
+
 			],
 			'opcache_jit' => is_array($opcacheStatus) ? ($opcacheStatus['jit'] ?? null) : null,
 		];
@@ -2831,6 +3037,11 @@ p {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
+td.winner-cell {
+  background: #dcefe9;
+}
+.ranking { display: block; white-space: nowrap; }
+.memory-best { background: #dcefe9; font-weight: 700; }
 .score-winner {
   color: var(--accent);
 }
@@ -2914,7 +3125,7 @@ summary {
 ' . self::summaryCards($result) . '
 <h2>At A Glance</h2>
 ' . self::outcomeSummary($result) . '
-<p class="note">Each workload row uses the fastest successful backend as 100%. Other cells show relative throughput and the measured milliseconds per operation.</p>
+<p class="note">Each workload row uses the fastest successful backend as 100%. Other cells show relative throughput and the measured milliseconds per operation. Faster lists all measured backends in ascending time order, with time divided by the fastest time (1.00x). Green cells highlight the fastest measurements, including ties.</p>
 ' . $readComparison . '
 ' . $writeComparison . '
 ' . $failureTable . '
@@ -2928,6 +3139,7 @@ summary {
 <h2>Write Results</h2>
 ' . $writeTable . '
 ' . $sampleDetails . '
+' . UcBenchComparison::memoryTable($result['read'], self::backendName(...)) . '
 </main>
 </body>
 </html>
@@ -3013,7 +3225,7 @@ summary {
 		foreach ($backendNames as $backendName) {
 			$html .= '<th class="num">' . self::h(self::backendName($backendName)) . '</th>';
 		}
-		$html .= '<th class="num">Faster/UserCache</th></tr></thead><tbody>';
+		$html .= '<th class="num">Faster</th></tr></thead><tbody>';
 
 		foreach ($groups as $caseName => $caseRows) {
 			$best = self::bestRow($caseRows, $metricName);
@@ -3025,10 +3237,12 @@ summary {
 			$html .= '<tr><td><code>' . self::h($caseName) . '</code><br>' . self::h($caseLabel)
 				. '</td>';
 			foreach ($backendNames as $backendName) {
-				$html .= '<td class="num">' . self::scoreCell(self::rowForBackend($caseRows, $backendName), $modeFailures[$caseName][$backendName] ?? null, $bestValue, $metricName)
+				$row = self::rowForBackend($caseRows, $backendName);
+				$winner = $row !== null && $bestValue !== null && (float) $row[$metricName] === $bestValue;
+				$html .= '<td class="num' . ($winner ? ' winner-cell' : '') . '">' . self::scoreCell($row, $modeFailures[$caseName][$backendName] ?? null, $bestValue, $metricName)
 					. '</td>';
 			}
-			$html .= '<td class="num">' . self::fasterVsUserCacheCell($caseRows, $metricName) . '</td></tr>';
+			$html .= '<td class="num">' . self::fasterCell($caseRows, $metricName) . '</td></tr>';
 		}
 
 		$html .= '</tbody></table>';
@@ -3038,7 +3252,7 @@ summary {
 
 	private static function comparisonBackendOrder(array $rows, array $modeFailures): array
 	{
-		$preferred = ['user_cache', 'apcu', 'apcu_igbinary'];
+		$preferred = ['user_cache', 'apcu', 'apcu_igbinary', 'yac'];
 		$seen = [];
 		foreach ($rows as $row) {
 			if (isset($row['backend'])) {
@@ -3079,27 +3293,15 @@ summary {
 
 		$value = (float) $row[$metricName];
 		$score = $bestValue !== null && $value > 0.0 ? ($bestValue / $value) * 100.0 : 0.0;
-		$class = $score >= 99.995 ? ' score-winner' : '';
+		$class = $bestValue !== null && $value === $bestValue ? ' score-winner' : '';
 
 		return '<span class="score' . $class . '">' . self::h(self::formatScore($score))
 			. ' (' . self::formatMs($value) . ')</span>';
 	}
 
-	private static function fasterVsUserCacheCell(array $caseRows, string $metricName): string
+	private static function fasterCell(array $caseRows, string $metricName): string
 	{
-		$userCache = self::rowForBackend($caseRows, 'user_cache');
-		$best = self::bestRow($caseRows, $metricName);
-		if ($userCache === null || $best === null) {
-			return '<span class="score-note">n/a</span>';
-		}
-
-		$userValue = (float) $userCache[$metricName];
-		$bestValue = (float) $best[$metricName];
-		if ($userValue <= 0.0 || $bestValue <= 0.0) {
-			return '<span class="score-note">n/a</span>';
-		}
-
-		return '<span class="score">' . self::h(self::number($userValue / $bestValue, 2) . 'x (' . self::backendName((string) $best['backend']) . ')') . '</span>';
+		return UcBenchComparison::fasterCell($caseRows, $metricName, self::backendName(...));
 	}
 
 	private static function failuresByCaseAndBackend(array $failures, string $mode): array
@@ -3138,13 +3340,10 @@ summary {
 
 	private static function bestRow(array $rows, string $metricName): ?array
 	{
-		if ($rows === []) {
-			return null;
-		}
+		$values = UcBenchComparison::metricValues($rows, $metricName);
+		$backend = array_key_first($values);
 
-		usort($rows, static fn (array $a, array $b): int => $a[$metricName] <=> $b[$metricName]);
-
-		return $rows[0];
+		return $backend !== null ? self::rowForBackend($rows, $backend) : null;
 	}
 
 	private static function rowForBackend(array $rows, string $backend): ?array
@@ -3341,8 +3540,9 @@ summary {
 	{
 		return match ($backend) {
 			'user_cache' => 'UserCache',
-			'apcu' => 'APCu',
+			'apcu' => 'APCu/php',
 			'apcu_igbinary' => 'APCu/igbinary',
+			'yac' => 'Yac/php',
 			default => $backend,
 		};
 	}
@@ -3410,7 +3610,7 @@ Options:
   --write-operations N      Store operations per measured write iteration. Default: 1000
   --key-space N             Distinct write keys per case/backend. Default: 32
   --cases a,b,c             Comma-separated payload cases.
-  --backends a,b,c          Comma-separated backends: user_cache,apcu,apcu_igbinary.
+  --backends a,b,c          Comma-separated backends: user_cache,apcu,apcu_igbinary,yac.
   --read-only               Run read benchmarks only.
   --write-only              Run write benchmarks only.
   --no-write                Alias for --read-only.

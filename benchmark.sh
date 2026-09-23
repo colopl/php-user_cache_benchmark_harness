@@ -3,17 +3,83 @@
 set -eu
 
 ROOT=$(CDPATH= cd "$(dirname "${0}")" && pwd)
+
+# Hosts such as Apple silicon Macs run vCPUs on performance and efficiency
+# cores, and per-vCPU throughput drops once more than a few vCPUs are busy.
+# Every measurement therefore runs pinned to one CPU set so before/after
+# comparisons use the same cores. "all" disables pinning.
+UC_BENCH_CPUS=${UC_BENCH_CPUS:-0-3}
+NEXT_IS_CPUS=0
+for ARG in "$@"; do
+	if test "${NEXT_IS_CPUS}" = 1; then
+		UC_BENCH_CPUS=${ARG}
+		NEXT_IS_CPUS=0
+	elif test "${ARG}" = --cpus; then
+		NEXT_IS_CPUS=1
+	fi
+done
+export UC_BENCH_CPUS
+
+pin_benchmark_cpus() {
+	if test "${UC_BENCH_CPUS}" = all || test "${UC_BENCH_PINNED_CPUS:-}" = "${UC_BENCH_CPUS}"; then
+		return
+	fi
+	if ! command -v taskset >/dev/null 2>&1; then
+		printf 'taskset is required to pin benchmarks to CPUs %s (use --cpus all to disable)\n' "${UC_BENCH_CPUS}" >&2
+		exit 1
+	fi
+	export UC_BENCH_PINNED_CPUS="${UC_BENCH_CPUS}"
+	exec taskset -c "${UC_BENCH_CPUS}" "$@"
+}
+
+# Independent suites do not require the APCu/Yac modules or an FPM installation.
+case "${1:-}" in
+	--micro)
+		shift
+		pin_benchmark_cpus "${0}" --micro "$@"
+		# run.py takes its CPU set from the affinity mask; drop --cpus LIST.
+		NEXT_IS_CPUS=0
+		for ARG in "$@"; do
+			shift
+			if test "${NEXT_IS_CPUS}" = 1; then
+				NEXT_IS_CPUS=0
+			elif test "${ARG}" = --cpus; then
+				NEXT_IS_CPUS=1
+			else
+				set -- "$@" "${ARG}"
+			fi
+		done
+		exec python3 "${ROOT}/scripts/microbench/run.py" "${@}"
+		;;
+	--persistence)
+		shift
+		# The runner pins its measured hosts itself; a later --cpus overrides this.
+		if test "${UC_BENCH_CPUS}" != all; then
+			set -- --cpus "${UC_BENCH_CPUS}" "$@"
+		fi
+		exec python3 "${ROOT}/scripts/benchmark_persistence.py" "${@}"
+		;;
+	--build-persistence)
+		shift
+		exec "${ROOT}/scripts/build_frankenphp.sh" "${@}"
+		;;
+esac
+
 PHP_CLI_BIN=${PHP_CLI_BIN:-"${ROOT}/../sapi/cli/php"}
 PHP_FPM_BIN=${PHP_FPM_BIN:-"${ROOT}/../sapi/fpm/php-fpm"}
 NGINX_BIN=${NGINX_BIN:-/usr/sbin/nginx}
 APCU_SO=${APCU_SO:-"${ROOT}/runtime/extensions/apcu/apcu.so"}
+YAC_SO=${YAC_SO:-"${ROOT}/runtime/extensions/yac/yac.so"}
 IGBINARY_SO=${IGBINARY_SO:-"${ROOT}/runtime/extensions/igbinary/igbinary.so"}
 SHM_SIZE_MB=${USER_CACHE_SHM_SIZE_MB:-128}
 OUTPUT=${OUTPUT:-"${ROOT}/BENCH_RESULT.html"}
+# The persistence suite's report; an empty value leaves it out.
+PERSISTENCE_REPORT=${PERSISTENCE_REPORT-"${ROOT}/BENCH_RESULT_PERSISTENCE.html"}
 RESULTS_DIR=${RESULTS_DIR:-}
 LOCK_DIR=${UC_BENCH_LOCK_DIR:-"${ROOT}/runtime/benchmark.lock"}
 LOCK_ACQUIRED=0
 RUN_FPM=1
+RENDER_ONLY=0
 QUICK=0
 RUNS=${UC_BENCH_RUNS:-3}
 RUNS_SET=0
@@ -22,9 +88,9 @@ READ_CASES=constant_array,route_table_read,large_array,large_string,large_object
 WRITE_CASES=${WRITE_CASES:-${READ_CASES}}
 RESIDENT_CASES=constant_array,route_table_read,large_array,large_string,product_listing_view_model
 FPM_HOT_CASES=route_table_read,large_array,large_string,large_object_graph,metadata_object_read,metadata_object_fetch_mutate,sleep_wakeup_object,serialize_magic_entity,unserialize_only_entity,sleep_wakeup_entity_collection,sleep_wakeup_large_dataset,recursive_reference_graph,mixed_serialization_payload,product_listing_view_model,multi_key_config_read,safe_direct_object,spl_collection_object,spl_heap_object,carbon_datetime_object,carbon_model_object,raw_datetime_object,raw_model_object,serialized_cycle_object,reference_assignment_object,cycle_assignment_object,nested_array_assignment
-BACKENDS=user_cache,apcu,apcu_igbinary
-FPM_PHP_BACKENDS=user_cache,apcu
-FPM_IGBINARY_BACKENDS=user_cache,apcu_igbinary
+BACKENDS=user_cache,apcu,apcu_igbinary,yac
+FPM_PHP_BACKENDS=user_cache,apcu,yac
+FPM_IGBINARY_BACKENDS=user_cache,apcu_igbinary,yac
 
 CLI_ITERATIONS=12
 CLI_WARMUP=2
@@ -52,6 +118,15 @@ FPM_CONCURRENCY=5
 usage() {
 	cat <<'EOF'
 Usage: ./benchmark.sh OPTIONS
+       ./benchmark.sh --micro MICRO_OPTIONS
+       ./benchmark.sh --persistence PERSISTENCE_OPTIONS
+       ./benchmark.sh --build-persistence BUILD_OPTIONS
+
+Independent suites (use the mode first, followed by --help for its options):
+  --micro               All diagnostic CLI microbenchmarks; optional before/after.
+  --persistence         Build/run FrankenPHP comparisons; write
+                        BENCH_RESULT_PERSISTENCE.html.
+  --build-persistence   Build an isolated ZTS/shared-embed PHP and FrankenPHP host.
 
 Runs the UserCache read-heavy benchmark set, adds write workload
 context, and writes a combined BENCH_RESULT.html.
@@ -60,6 +135,8 @@ By default the full suite is executed 3 times and every published metric is
 the median across runs (single runs swing by tens of percent on the FPM
 one-fetch workloads); BENCH_RESULT.html is rendered from the aggregate.
 Use --runs 1 for a single measurement run. --quick defaults to a single run.
+The report also summarizes and links BENCH_RESULT_PERSISTENCE.html when it
+exists.
 
 Options:
   --quick               Use short smoke-test iteration counts (default: 1 run).
@@ -69,10 +146,16 @@ Options:
   --php-fpm FILE        php-fpm binary. Default: ../sapi/fpm/php-fpm
   --nginx-bin FILE      nginx binary. Default: /usr/sbin/nginx
   --apcu-so FILE        APCu extension module path.
+  --yac-so FILE         Yac extension module path.
   --igbinary-so FILE    igbinary extension module path.
   --shm-size-mb N       user_cache.shm_size in MiB. Default: 128
   --results-dir DIR     Directory for raw JSON/HTML artifacts.
+  --render-only         Re-render --output from an existing --results-dir
+                        (its median aggregate when present) without measuring.
   --output FILE         Combined HTML report. Default: BENCH_RESULT.html
+  --cpus LIST           taskset CPU list for every benchmark process, or "all".
+                        Default: UC_BENCH_CPUS, else 0-3. Also applies to
+                        --micro and --persistence through UC_BENCH_CPUS.
 EOF
 }
 
@@ -110,6 +193,69 @@ latest_json() {
 	printf '%s\n' "${JSON_VALUE}"
 }
 
+# APCu takes its serializer from a system INI, so APCu/igbinary bulk rows come
+# from a second process and are appended to the same result file.
+run_bulk_apcu_igbinary() {
+	KEY_COUNT_VALUE=${1}
+	OPERATIONS_VALUE=${2}
+	JSON_VALUE=${3}
+	if test ! -f "${IGBINARY_SO}"; then
+		printf 'igbinary module not found; skipping APCu/igbinary bulk rows: %s\n' "${IGBINARY_SO}"
+		return
+	fi
+	"${PHP_CLI_BIN}" \
+		-d opcache.enable=1 \
+		-d opcache.enable_cli=1 \
+		-d opcache.jit=0 \
+		-d "extension=${IGBINARY_SO}" \
+		-d "extension=${APCU_SO}" \
+		-d apc.enable_cli=1 \
+		-d apc.serializer=igbinary \
+		-d "apc.shm_size=${SHM_SIZE_MB}M" \
+		"${ROOT}/scripts/benchmark_user_cache_bulk_read.php" \
+		--backends apcu \
+		--key-count "${KEY_COUNT_VALUE}" \
+		--operations "${OPERATIONS_VALUE}" \
+		--iterations "${BULK_ITERATIONS}" \
+		--warmup "${BULK_WARMUP}" \
+		--merge-into "${JSON_VALUE}" \
+		--output "${JSON_VALUE%.json}-apcu-igbinary.json"
+}
+
+# Renders OUTPUT from a results directory, preferring its median aggregate.
+render_results_dir() {
+	RENDER_DIR=${1}
+	set --
+	if test -f "${RENDER_DIR}/cpus.txt"; then
+		set -- --cpus "$(sed -n 's/^UC_BENCH_CPUS=//p' "${RENDER_DIR}/cpus.txt")"
+	fi
+	if test -d "${RENDER_DIR}/median"; then
+		RENDER_DIR="${RENDER_DIR}/median"
+		RENDER_CLI_READ="${RENDER_DIR}/cli-read/user-cache-benchmark-median.json"
+		RENDER_CLI_WRITE="${RENDER_DIR}/cli-write/user-cache-benchmark-median.json"
+	else
+		RENDER_CLI_READ=$(latest_json "${RENDER_DIR}/cli-read")
+		RENDER_CLI_WRITE=$(latest_json "${RENDER_DIR}/cli-write")
+	fi
+	set -- "$@" \
+		--cli-read "${RENDER_CLI_READ}" \
+		--cli-write "${RENDER_CLI_WRITE}" \
+		--resident "${RENDER_DIR}/resident-payload-probe.json" \
+		--bulk "${RENDER_DIR}/bulk-read-32.json" \
+		--bulk "${RENDER_DIR}/bulk-read-128.json"
+	for RENDER_FPM in once hot; do
+		for RENDER_SERIALIZER in php igbinary; do
+			if test -f "${RENDER_DIR}/fpm-read-${RENDER_FPM}-${RENDER_SERIALIZER}.json"; then
+				set -- "$@" --fpm-${RENDER_FPM} "${RENDER_DIR}/fpm-read-${RENDER_FPM}-${RENDER_SERIALIZER}.json"
+			fi
+		done
+	done
+	if test -n "${PERSISTENCE_REPORT}" && test -f "${PERSISTENCE_REPORT}"; then
+		set -- "$@" --persistence "${PERSISTENCE_REPORT}"
+	fi
+	"${PHP_CLI_BIN}" "${ROOT}/scripts/render_user_cache_performance_report.php" "$@" --output "${OUTPUT}"
+}
+
 acquire_benchmark_lock() {
 	if test "${UC_BENCH_LOCK_HELD:-0}" = 1; then
 		return
@@ -145,6 +291,8 @@ cleanup() {
 	exit "${EXIT_CODE}"
 }
 
+pin_benchmark_cpus "${0}" "$@"
+
 while test "${#}" -gt 0; do
 	case "${1}" in
 		--quick)
@@ -158,6 +306,10 @@ while test "${#}" -gt 0; do
 			;;
 		--no-fpm)
 			RUN_FPM=0
+			shift
+			;;
+		--render-only)
+			RENDER_ONLY=1
 			shift
 			;;
 		--php)
@@ -176,6 +328,10 @@ while test "${#}" -gt 0; do
 			APCU_SO=$(absolute_path "${2:?--apcu-so requires a value}")
 			shift 2
 			;;
+		--yac-so)
+			YAC_SO=$(absolute_path "${2:?--yac-so requires a value}")
+			shift 2
+			;;
 		--igbinary-so)
 			IGBINARY_SO=$(absolute_path "${2:?--igbinary-so requires a value}")
 			shift 2
@@ -190,6 +346,9 @@ while test "${#}" -gt 0; do
 			;;
 		--output)
 			OUTPUT=$(absolute_path "${2:?--output requires a value}")
+			shift 2
+			;;
+		--cpus)
 			shift 2
 			;;
 		-h|--help)
@@ -216,12 +375,28 @@ fi
 PHP_CLI_BIN=$(absolute_path "${PHP_CLI_BIN}")
 PHP_FPM_BIN=$(absolute_path "${PHP_FPM_BIN}")
 APCU_SO=$(absolute_path "${APCU_SO}")
+YAC_SO=$(absolute_path "${YAC_SO}")
 IGBINARY_SO=$(absolute_path "${IGBINARY_SO}")
 OUTPUT=$(absolute_path "${OUTPUT}")
+
+if test "${RENDER_ONLY}" = 1; then
+	if test -z "${RESULTS_DIR}" || test ! -d "${RESULTS_DIR}"; then
+		printf '%s\n' '--render-only requires an existing --results-dir' >&2
+		exit 1
+	fi
+	require_executable "${PHP_CLI_BIN}" "PHP CLI"
+	render_results_dir "${RESULTS_DIR}"
+	exit 0
+fi
 
 if test -z "${RESULTS_DIR}"; then
 	RESULTS_DIR="${ROOT}/results/read-workloads-$(date -u +%Y%m%dT%H%M%SZ)"
 fi
+mkdir -p "${RESULTS_DIR}"
+{
+	printf 'UC_BENCH_CPUS=%s\n' "${UC_BENCH_CPUS}"
+	taskset -pc "$$" 2>/dev/null || true
+} > "${RESULTS_DIR}/cpus.txt"
 
 # Quick mode is a smoke test; a single run is enough unless --runs was given.
 if test "${QUICK}" = 1 && test "${RUNS_SET}" = 0; then
@@ -248,13 +423,15 @@ if test "${RUNS}" -gt 1; then
 	RUN_INDEX=1
 	while test "${RUN_INDEX}" -le "${RUNS}"; do
 		printf '\n===== Run %s/%s =====\n' "${RUN_INDEX}" "${RUNS}"
+		# Per-run reports stay self-contained; only the final report links suites.
 		# shellcheck disable=SC2086
-		"${0}" ${CHILD_FLAGS} \
+		PERSISTENCE_REPORT= "${0}" ${CHILD_FLAGS} \
 			--runs 1 \
 			--php "${PHP_CLI_BIN}" \
 			--php-fpm "${PHP_FPM_BIN}" \
 			--nginx-bin "${NGINX_BIN}" \
 			--apcu-so "${APCU_SO}" \
+			--yac-so "${YAC_SO}" \
 			--igbinary-so "${IGBINARY_SO}" \
 			--shm-size-mb "${SHM_SIZE_MB}" \
 			--results-dir "${RESULTS_DIR}/run${RUN_INDEX}" \
@@ -274,25 +451,7 @@ if test "${RUNS}" -gt 1; then
 	"${PHP_CLI_BIN}" "${ROOT}/scripts/aggregate_results_median.php" --output "${MEDIAN_DIR}" ${RUN_DIRS}
 
 	printf 'Writing median-combined report\n'
-	set -- \
-		--cli-read "${MEDIAN_DIR}/cli-read/user-cache-benchmark-median.json" \
-		--cli-write "${MEDIAN_DIR}/cli-write/user-cache-benchmark-median.json" \
-		--resident "${MEDIAN_DIR}/resident-payload-probe.json" \
-		--bulk "${MEDIAN_DIR}/bulk-read-32.json" \
-		--bulk "${MEDIAN_DIR}/bulk-read-128.json"
-	if test -f "${MEDIAN_DIR}/fpm-read-once-php.json"; then
-		set -- "$@" --fpm-once "${MEDIAN_DIR}/fpm-read-once-php.json"
-	fi
-	if test -f "${MEDIAN_DIR}/fpm-read-once-igbinary.json"; then
-		set -- "$@" --fpm-once "${MEDIAN_DIR}/fpm-read-once-igbinary.json"
-	fi
-	if test -f "${MEDIAN_DIR}/fpm-read-hot-php.json"; then
-		set -- "$@" --fpm-hot "${MEDIAN_DIR}/fpm-read-hot-php.json"
-	fi
-	if test -f "${MEDIAN_DIR}/fpm-read-hot-igbinary.json"; then
-		set -- "$@" --fpm-hot "${MEDIAN_DIR}/fpm-read-hot-igbinary.json"
-	fi
-	"${PHP_CLI_BIN}" "${ROOT}/scripts/render_user_cache_performance_report.php" "$@" --output "${OUTPUT}"
+	render_results_dir "${RESULTS_DIR}"
 
 	printf 'Wrote median-combined report: %s\n' "${OUTPUT}"
 	exit 0
@@ -344,6 +503,7 @@ USER_CACHE_SHM_SIZE_MB="${SHM_SIZE_MB}" \
 "${ROOT}/scripts/benchmark_user_cache.sh" \
 	--php "${PHP_CLI_BIN}" \
 	--apcu-so "${APCU_SO}" \
+	--yac-so "${YAC_SO}" \
 	--igbinary-so "${IGBINARY_SO}" \
 	--read-only \
 	--iterations "${CLI_ITERATIONS}" \
@@ -361,6 +521,7 @@ USER_CACHE_SHM_SIZE_MB="${SHM_SIZE_MB}" \
 "${ROOT}/scripts/benchmark_user_cache.sh" \
 	--php "${PHP_CLI_BIN}" \
 	--apcu-so "${APCU_SO}" \
+	--yac-so "${YAC_SO}" \
 	--igbinary-so "${IGBINARY_SO}" \
 	--write-only \
 	--iterations "${WRITE_ITERATIONS}" \
@@ -398,12 +559,18 @@ BULK32_JSON="${RESULTS_DIR}/bulk-read-32.json"
 	-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
 	-d apc.enable_cli=1 \
 	-d "extension=${APCU_SO}" \
+	-d "extension=${YAC_SO}" \
+	-d "apc.shm_size=${SHM_SIZE_MB}M" \
+	-d yac.enable=1 -d yac.enable_cli=1 -d yac.serializer=php \
+	-d yac.compress_threshold=-1 -d yac.keys_memory_size=8M \
+	-d "yac.values_memory_size=${SHM_SIZE_MB}M" \
 	"${ROOT}/scripts/benchmark_user_cache_bulk_read.php" \
 	--key-count 32 \
 	--operations "${BULK32_OPERATIONS}" \
 	--iterations "${BULK_ITERATIONS}" \
 	--warmup "${BULK_WARMUP}" \
 	--output "${BULK32_JSON}"
+run_bulk_apcu_igbinary 32 "${BULK32_OPERATIONS}" "${BULK32_JSON}"
 
 printf '\nStep 5/7: Bulk read, 128 keys\n'
 BULK128_JSON="${RESULTS_DIR}/bulk-read-128.json"
@@ -416,12 +583,18 @@ BULK128_JSON="${RESULTS_DIR}/bulk-read-128.json"
 	-d "user_cache.shm_size=${SHM_SIZE_MB}M" \
 	-d apc.enable_cli=1 \
 	-d "extension=${APCU_SO}" \
+	-d "extension=${YAC_SO}" \
+	-d "apc.shm_size=${SHM_SIZE_MB}M" \
+	-d yac.enable=1 -d yac.enable_cli=1 -d yac.serializer=php \
+	-d yac.compress_threshold=-1 -d yac.keys_memory_size=8M \
+	-d "yac.values_memory_size=${SHM_SIZE_MB}M" \
 	"${ROOT}/scripts/benchmark_user_cache_bulk_read.php" \
 	--key-count 128 \
 	--operations "${BULK128_OPERATIONS}" \
 	--iterations "${BULK_ITERATIONS}" \
 	--warmup "${BULK_WARMUP}" \
 	--output "${BULK128_JSON}"
+run_bulk_apcu_igbinary 128 "${BULK128_OPERATIONS}" "${BULK128_JSON}"
 
 if test "${RUN_FPM}" = 1; then
 	printf '\nStep 6/7: FPM one fetch per request\n'
@@ -432,8 +605,10 @@ if test "${RUN_FPM}" = 1; then
 		--php-fpm "${PHP_FPM_BIN}" \
 		--nginx-bin "${NGINX_BIN}" \
 		--apcu-so "${APCU_SO}" \
+		--yac-so "${YAC_SO}" \
 		--apc-serializer php \
 		--shm-size "${SHM_SIZE_MB}M" \
+		--apc-shm-size "${SHM_SIZE_MB}M" \
 		--output-dir "${RESULTS_DIR}" \
 		--operations 1 \
 		--requests "${FPM_ONCE_REQUESTS}" \
@@ -448,9 +623,11 @@ if test "${RUN_FPM}" = 1; then
 		--php-fpm "${PHP_FPM_BIN}" \
 		--nginx-bin "${NGINX_BIN}" \
 		--apcu-so "${APCU_SO}" \
+		--yac-so "${YAC_SO}" \
 		--igbinary-so "${IGBINARY_SO}" \
 		--apc-serializer igbinary \
 		--shm-size "${SHM_SIZE_MB}M" \
+		--apc-shm-size "${SHM_SIZE_MB}M" \
 		--output-dir "${RESULTS_DIR}" \
 		--operations 1 \
 		--requests "${FPM_ONCE_REQUESTS}" \
@@ -469,8 +646,10 @@ if test "${RUN_FPM}" = 1; then
 		--php-fpm "${PHP_FPM_BIN}" \
 		--nginx-bin "${NGINX_BIN}" \
 		--apcu-so "${APCU_SO}" \
+		--yac-so "${YAC_SO}" \
 		--apc-serializer php \
 		--shm-size "${SHM_SIZE_MB}M" \
+		--apc-shm-size "${SHM_SIZE_MB}M" \
 		--output-dir "${RESULTS_DIR}" \
 		--operations "${FPM_HOT_OPERATIONS}" \
 		--requests "${FPM_HOT_REQUESTS}" \
@@ -485,9 +664,11 @@ if test "${RUN_FPM}" = 1; then
 		--php-fpm "${PHP_FPM_BIN}" \
 		--nginx-bin "${NGINX_BIN}" \
 		--apcu-so "${APCU_SO}" \
+		--yac-so "${YAC_SO}" \
 		--igbinary-so "${IGBINARY_SO}" \
 		--apc-serializer igbinary \
 		--shm-size "${SHM_SIZE_MB}M" \
+		--apc-shm-size "${SHM_SIZE_MB}M" \
 		--output-dir "${RESULTS_DIR}" \
 		--operations "${FPM_HOT_OPERATIONS}" \
 		--requests "${FPM_HOT_REQUESTS}" \
@@ -497,28 +678,10 @@ if test "${RUN_FPM}" = 1; then
 		--cases "${FPM_HOT_CASES}" \
 		--backends "${FPM_IGBINARY_BACKENDS}" \
 		--output "${FPM_HOT_IGBINARY_JSON}"
-
-	printf '\nWriting combined report\n'
-	"${PHP_CLI_BIN}" "${ROOT}/scripts/render_user_cache_performance_report.php" \
-		--cli-read "${CLI_JSON}" \
-		--cli-write "${CLI_WRITE_JSON}" \
-		--resident "${RESIDENT_JSON}" \
-		--bulk "${BULK32_JSON}" \
-		--bulk "${BULK128_JSON}" \
-		--fpm-once "${FPM_ONCE_JSON}" \
-		--fpm-once "${FPM_ONCE_IGBINARY_JSON}" \
-		--fpm-hot "${FPM_HOT_JSON}" \
-		--fpm-hot "${FPM_HOT_IGBINARY_JSON}" \
-		--output "${OUTPUT}"
 else
 	printf '\nStep 6/7: FPM benchmarks skipped\n'
 	printf 'Step 7/7: FPM benchmarks skipped\n'
-	printf '\nWriting combined report\n'
-	"${PHP_CLI_BIN}" "${ROOT}/scripts/render_user_cache_performance_report.php" \
-		--cli-read "${CLI_JSON}" \
-		--cli-write "${CLI_WRITE_JSON}" \
-		--resident "${RESIDENT_JSON}" \
-		--bulk "${BULK32_JSON}" \
-		--bulk "${BULK128_JSON}" \
-		--output "${OUTPUT}"
 fi
+
+printf '\nWriting combined report\n'
+render_results_dir "${RESULTS_DIR}"

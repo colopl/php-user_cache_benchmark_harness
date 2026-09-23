@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - BENCH_RESULT.html
+      - BENCH_RESULT_PERSISTENCE.html
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -36,6 +37,17 @@ jobs:
         run: |
           mkdir -p _site
           cp BENCH_RESULT.html _site/index.html
+          cp BENCH_RESULT.html _site/BENCH_RESULT.html
+          if test -f BENCH_RESULT_PERSISTENCE.html; then
+            cp BENCH_RESULT_PERSISTENCE.html _site/BENCH_RESULT_PERSISTENCE.html
+          fi
+          # The index links the other suite reports; each must be deployed with it.
+          for report in $(grep -o 'href="BENCH_RESULT_[A-Z_]*\.html"' BENCH_RESULT.html | sed 's/^href="//; s/"$//' | sort -u); do
+            if test ! -f "_site/$report"; then
+              echo "BENCH_RESULT.html links to $report, which is not committed" >&2
+              exit 1
+            fi
+          done
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:

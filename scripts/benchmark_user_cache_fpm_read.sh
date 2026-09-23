@@ -9,6 +9,7 @@ NGINX_BIN=${NGINX_BIN:-/usr/sbin/nginx}
 BASE_URL=${BASE_URL:-http://127.0.0.1:8080/user_cache_fpm_read_bench.php}
 APCU_SO=${APCU_SO:-"${ROOT}/runtime/extensions/apcu/apcu.so"}
 IGBINARY_SO=${IGBINARY_SO:-}
+YAC_SO=${YAC_SO:-"${ROOT}/runtime/extensions/yac/yac.so"}
 SHM_SIZE=${USER_CACHE_SHM_SIZE:-64M}
 MEMORY_LIMIT=${USER_CACHE_BENCHMARK_MEMORY_LIMIT:--1}
 APC_SHM_SIZE=${APC_SHM_SIZE:-128M}
@@ -31,6 +32,7 @@ Wrapper options:
   --nginx-bin FILE      nginx binary. Default: /usr/sbin/nginx
   --base-url URL        Benchmark endpoint URL.
   --apcu-so FILE        APCu extension module.
+  --yac-so FILE         Yac extension module.
   --igbinary-so FILE    igbinary extension module.
   --apc-serializer NAME APCu serializer. Default: php
   --shm-size SIZE       user_cache.shm_size. Default: 64M
@@ -197,6 +199,10 @@ while test "${#}" -gt 0; do
 			APCU_SO=$(absolute_path "${2:?--apcu-so requires a value}")
 			shift 2
 			;;
+		--yac-so)
+			YAC_SO=$(absolute_path "${2:?--yac-so requires a value}")
+			shift 2
+			;;
 		--igbinary-so)
 			IGBINARY_SO=$(absolute_path "${2:?--igbinary-so requires a value}")
 			shift 2
@@ -230,6 +236,7 @@ done
 PHP_FPM_BIN=$(absolute_path "${PHP_FPM_BIN}")
 PHP_CLI_BIN=$(absolute_path "${PHP_CLI_BIN}")
 APCU_SO=$(absolute_path "${APCU_SO}")
+YAC_SO=$(absolute_path "${YAC_SO}")
 if test -n "${IGBINARY_SO}"; then
 	IGBINARY_SO=$(absolute_path "${IGBINARY_SO}")
 fi
@@ -239,6 +246,7 @@ require_executable "${PHP_FPM_BIN}" "php-fpm"
 require_executable "${PHP_CLI_BIN}" "PHP CLI"
 require_executable "${NGINX_BIN}" "nginx"
 require_file "${APCU_SO}" "APCu extension"
+require_file "${YAC_SO}" "Yac extension"
 if test -n "${IGBINARY_SO}"; then
 	require_file "${IGBINARY_SO}" "igbinary extension"
 fi
@@ -254,6 +262,9 @@ if test -n "${IGBINARY_SO}"; then
 	"${PHP_FPM_BIN}" \
 		-n \
 		-d "extension=${APCU_SO}" \
+		-d "extension=${YAC_SO}" \
+		-d yac.enable=1 -d yac.serializer=php -d yac.compress_threshold=-1 \
+		-d yac.keys_memory_size=8M -d "yac.values_memory_size=${SHM_SIZE}" \
 		-d "extension=${IGBINARY_SO}" \
 		-d "memory_limit=${MEMORY_LIMIT}" \
 		-d apc.enabled=1 \
@@ -270,6 +281,9 @@ else
 	"${PHP_FPM_BIN}" \
 	-n \
 	-d "extension=${APCU_SO}" \
+	-d "extension=${YAC_SO}" \
+	-d yac.enable=1 -d yac.serializer=php -d yac.compress_threshold=-1 \
+	-d yac.keys_memory_size=8M -d "yac.values_memory_size=${SHM_SIZE}" \
 	-d "memory_limit=${MEMORY_LIMIT}" \
 	-d apc.enabled=1 \
 	-d "apc.shm_size=${APC_SHM_SIZE}" \

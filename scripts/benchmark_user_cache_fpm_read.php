@@ -20,7 +20,7 @@ final class UserCacheFpmReadRunner
 		'carbon_datetime_object',
 		'carbon_model_object',
 	];
-	private array $backends = ['user_cache', 'apcu', 'apcu_igbinary'];
+	private array $backends = ['user_cache', 'apcu', 'apcu_igbinary', 'yac'];
 	private int $operations = 1;
 	private int $requests = 60;
 	private int $warmup = 10;
@@ -183,7 +183,7 @@ final class UserCacheFpmReadRunner
 
 	private function usage(): void
 	{
-		fwrite(STDOUT, "Usage: php scripts/benchmark_user_cache_fpm_read.php [--base-url URL] [--cases a,b] [--backends user_cache,apcu,apcu_igbinary] [--operations N] [--requests N] [--warmup N] [--concurrency N] [--hold-us N] [--output FILE]\n");
+		fwrite(STDOUT, "Usage: php scripts/benchmark_user_cache_fpm_read.php [--base-url URL] [--cases a,b] [--backends user_cache,apcu,apcu_igbinary,yac] [--operations N] [--requests N] [--warmup N] [--concurrency N] [--hold-us N] [--output FILE]\n");
 	}
 
 	private function runMeasureRequests(string $caseName, string $backendName, string $digest, int $requestCount): array

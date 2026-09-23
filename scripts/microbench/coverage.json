@@ -1,0 +1,262 @@
+{
+  "schema_version": 1,
+  "case_count": 127,
+  "suite_counts": {
+    "core": 38,
+    "review": 1,
+    "status": 21,
+    "lru": 12,
+    "writers": 44,
+    "pools": 8,
+    "snapshot": 3
+  },
+  "workloads": [
+    {
+      "origin": "docs/user-cache-microbench.php",
+      "origin_sha256": "231cb39b0f7b7f3b2a0e59df374121501de6fc20d60de77fb5ac648749471993",
+      "workers": [
+        "workers/core.php"
+      ],
+      "cases": [
+        "core/fetch_scalar_1",
+        "core/fetch_scalar_8",
+        "core/fetch_scalar_32",
+        "core/fetch_scalar_128",
+        "core/fetch_scalar_256",
+        "core/fetch_string_300",
+        "core/fetch_string_300_128",
+        "core/fetch_string_300_2048",
+        "core/fetch_string_300_32768",
+        "core/fetch_string_8192",
+        "core/fetch_packed_array",
+        "core/fetch_hash_array",
+        "core/fetch_object",
+        "core/fetch_dynamic_object",
+        "core/fetch_destructor_object",
+        "core/fetch_magic",
+        "core/fetch_spl",
+        "core/fetch_miss",
+        "core/fetch_long_key",
+        "core/has_scalar",
+        "core/store_scalar",
+        "core/store_string_300",
+        "core/store_delete",
+        "core/fetch_multiple_32",
+        "core/fetch_multiple_128",
+        "core/store_multiple_32",
+        "core/lock_unlock",
+        "core/remember_hit",
+        "core/remember_miss",
+        "core/status_empty",
+        "core/status_fragmented",
+        "core/pool_status",
+        "core/memory_pools",
+        "core/memory_strings",
+        "core/memory_objects",
+        "core/memory_large_objects",
+        "core/memory_fixed_arrays",
+        "core/memory_object_arrays",
+        "pools/original"
+      ]
+    },
+    {
+      "origin": "docs/user-cache-review-benchmark.php",
+      "origin_sha256": "bd7d8017cada0b060d01c162b7a7783cf71128969f209b6ac90b3f5801c5811b",
+      "workers": [
+        "workers/review.php"
+      ],
+      "cases": [
+        "review/pipeline"
+      ]
+    },
+    {
+      "origin": "docs/user-cache-contention-bench/status.php",
+      "origin_sha256": "76e8357662bbf4440c86b82d90920a6225cfb24b336a34befa8a22b4165bc513",
+      "workers": [
+        "workers/status.php"
+      ],
+      "cases": [
+        "status/first_0",
+        "status/warm_0",
+        "status/other-write_0",
+        "status/other-replace_0",
+        "status/other-churn_0",
+        "status/first_128",
+        "status/warm_128",
+        "status/same-write_128",
+        "status/other-write_128",
+        "status/same-replace_128",
+        "status/other-replace_128",
+        "status/same-churn_128",
+        "status/other-churn_128",
+        "status/first_4096",
+        "status/warm_4096",
+        "status/same-write_4096",
+        "status/other-write_4096",
+        "status/same-replace_4096",
+        "status/other-replace_4096",
+        "status/same-churn_4096",
+        "status/other-churn_4096"
+      ]
+    },
+    {
+      "origin": "docs/user-cache-contention-bench/lru.php",
+      "origin_sha256": "663ed3f61389d5e8fbc20794f553ebf6731592a5a43d240eb7e3577629f83ae3",
+      "workers": [
+        "workers/lru.php"
+      ],
+      "cases": [
+        "lru/scalar_1",
+        "lru/scalar_64",
+        "lru/scalar_128",
+        "lru/scalar_2048",
+        "lru/string_1",
+        "lru/string_64",
+        "lru/string_128",
+        "lru/string_2048",
+        "lru/array_1",
+        "lru/array_64",
+        "lru/array_128",
+        "lru/array_2048"
+      ]
+    },
+    {
+      "origin": "docs/user-cache-contention-bench/writers.php",
+      "origin_sha256": "79333d76780c65a42556d4f9577649131c4e2d2428a6777cf1912ddf1b714923",
+      "workers": [
+        "workers/writers.php"
+      ],
+      "cases": [
+        "writers/scalar_disjoint_1",
+        "writers/scalar_same_1",
+        "writers/increment_disjoint_1",
+        "writers/increment_same_1",
+        "writers/string_disjoint_1",
+        "writers/string_same_1",
+        "writers/array_disjoint_1",
+        "writers/array_same_1",
+        "writers/mixed_disjoint_1",
+        "writers/mixed_same_1",
+        "writers/insert_disjoint_1",
+        "writers/scalar_disjoint_2",
+        "writers/scalar_same_2",
+        "writers/increment_disjoint_2",
+        "writers/increment_same_2",
+        "writers/string_disjoint_2",
+        "writers/string_same_2",
+        "writers/array_disjoint_2",
+        "writers/array_same_2",
+        "writers/mixed_disjoint_2",
+        "writers/mixed_same_2",
+        "writers/insert_disjoint_2",
+        "writers/scalar_disjoint_4",
+        "writers/scalar_same_4",
+        "writers/increment_disjoint_4",
+        "writers/increment_same_4",
+        "writers/string_disjoint_4",
+        "writers/string_same_4",
+        "writers/array_disjoint_4",
+        "writers/array_same_4",
+        "writers/mixed_disjoint_4",
+        "writers/mixed_same_4",
+        "writers/insert_disjoint_4",
+        "writers/scalar_disjoint_8",
+        "writers/scalar_same_8",
+        "writers/increment_disjoint_8",
+        "writers/increment_same_8",
+        "writers/string_disjoint_8",
+        "writers/string_same_8",
+        "writers/array_disjoint_8",
+        "writers/array_same_8",
+        "writers/mixed_disjoint_8",
+        "writers/mixed_same_8",
+        "writers/insert_disjoint_8"
+      ]
+    },
+    {
+      "origin": "docs/user-cache-contention-bench/pools.php",
+      "origin_sha256": "8c17d898f6b22c43456150a1dd0001b346de2cee098b4ad6b8b0699024007d9a",
+      "workers": [
+        "workers/core.php",
+        "workers/pools.php"
+      ],
+      "cases": [
+        "pools/original",
+        "pools/cold",
+        "pools/warm",
+        "pools/warm-create",
+        "pools/end-to-end",
+        "pools/create-only",
+        "pools/existing-miss",
+        "pools/warm-existing"
+      ]
+    },
+    {
+      "origin": "docs/user-cache-contention-bench/snapshot-memory.php",
+      "origin_sha256": "711dc59377c935a49cca39150a13f200356f5d1b764147298161d084cb3b2ffd",
+      "workers": [
+        "workers/snapshot-memory.php"
+      ],
+      "cases": [
+        "snapshot/keys_0",
+        "snapshot/keys_128",
+        "snapshot/keys_4096"
+      ]
+    }
+  ],
+  "comparison_runners": [
+    {
+      "origin": "docs/compare-user-cache-microbench.py",
+      "replacement": "run.py --suites core"
+    },
+    {
+      "origin": "docs/user-cache-contention-bench/run.py",
+      "replacement": "run.py --suites status lru writers"
+    },
+    {
+      "origin": "docs/user-cache-contention-bench/pools.py",
+      "replacement": "run.py --suites pools"
+    }
+  ],
+  "review_pipeline": [
+    "Three store samples before lock churn",
+    "20,000 distinct-key lock/unlock cycles",
+    "Three store samples after lock churn",
+    "10,000 dynamic-string store/delete cycles with retained PHP bytes",
+    "One 2,000-entry bulk store with result validation"
+  ],
+  "excluded_functional_probes": [
+    {
+      "origin": "docs/user-cache-contention-bench/lifecycle.php",
+      "reason": "Correctness/lifecycle assertions, not a timed microbenchmark"
+    },
+    {
+      "origin": "docs/user-cache-contention-bench/interrupted-write.php and interrupted-write.gdb",
+      "reason": "Debugger/SIGKILL recovery correctness probe"
+    },
+    {
+      "origin": "docs/user-cache-contention-bench/lru-clock.gdb",
+      "reason": "Debugger call counting and layout diagnostics, not performance timing"
+    },
+    {
+      "origin": "docs/user-cache-allocation-probe/ and docs/user-cache-persistent-probe/",
+      "reason": "Allocation-failure, ownership and lifecycle correctness probes"
+    },
+    {
+      "origin": "ext/user_cache/tests/*.phpt",
+      "reason": "Functional tests are not timing benchmarks"
+    }
+  ],
+  "handled_separately": [
+    {
+      "origin": "docs/user-cache-frankenphp-bench/ and docs/user-cache-contention-bench/http.py, http-scalar/",
+      "reason": "FrankenPHP HTTP benchmark migration is a separate harness component"
+    }
+  ],
+  "notes": [
+    "Origin paths document provenance only; the workers and runner never load php-src/docs at runtime.",
+    "pools/original intentionally repeats core/memory_pools as a control.",
+    "Quick retains every case and its key counts; it shortens rounds and timed loops, including review churn loops.",
+    "Unsupported writers remain in the catalog and receive explicit skip records."
+  ]
+}
